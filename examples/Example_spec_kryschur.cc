@@ -277,12 +277,12 @@ int main (int argc, char ** argv)
   }
   std::cout << "Sorting eigenvalues using " << rfToString(RF) << std::endl;
 
-  //const int Ls=16;
-  const int Ls = 8;
+  const int Ls=16;
+  // const int Ls = 8;
 
 //   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(), GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
-  //std::vector<int> lat_size {16, 16, 16, 32};
-  std::vector<int> lat_size {8, 8, 8, 8};
+  std::vector<int> lat_size {16, 16, 16, 32};
+  // std::vector<int> lat_size {8, 8, 8, 8};
   std::cout << "Lattice size: " << lat_size << std::endl;
   GridCartesian * UGrid = SpaceTimeGrid::makeFourDimGrid(lat_size, 
 								          GridDefaultSimd(Nd,vComplex::Nsimd()),
@@ -303,8 +303,8 @@ int main (int argc, char ** argv)
   FieldMetaData header;
   NerscIO::readConfiguration(Umu,header,file);
 
-  // RealD mass=0.01;
-  RealD mass=0.001;
+  RealD mass=0.01;
+  // RealD mass=0.001;
   RealD M5=1.8;
 
   DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
