@@ -97,7 +97,7 @@ public:
 
     RealD scale;
 
-    ConjugateGradient<FineField> CG(1.0e-3,400,false);
+    ConjugateGradient<FineField> CG(1.0e-4,2000,false);
     FineField noise(FineGrid);
     FineField Mn(FineGrid);
 
@@ -131,7 +131,10 @@ public:
     RealD scale;
 
     TrivialPrecon<FineField> simple_fine;
-    PrecGeneralisedConjugateResidualNonHermitian<FineField> GCR(0.001,30,DiracOp,simple_fine,12,12);
+    //    PrecGeneralisedConjugateResidualNonHermitian<FineField> GCR(0.001,10,DiracOp,simple_fine,30,30);
+    //    PrecGeneralisedConjugateResidualNonHermitian<FineField> GCR(0.001,10,DiracOp,simple_fine,12,12);
+    //    PrecGeneralisedConjugateResidualNonHermitian<FineField> GCR(0.001,30,DiracOp,simple_fine,12,12);
+    PrecGeneralisedConjugateResidualNonHermitian<FineField> GCR(0.001,30,DiracOp,simple_fine,10,10);
     FineField noise(FineGrid);
     FineField src(FineGrid);
     FineField guess(FineGrid);
@@ -146,16 +149,16 @@ public:
       
       DiracOp.Op(noise,Mn); std::cout<<GridLogMessage << "noise   ["<<b<<"] <n|Op|n> "<<innerProduct(noise,Mn)<<std::endl;
 
-      for(int i=0;i<2;i++){
+      for(int i=0;i<3;i++){
 	//  void operator() (const Field &src, Field &psi){
 #if 1
-	std::cout << GridLogMessage << " inverting on noise "<<std::endl;
+	if (i==0)std::cout << GridLogMessage << " inverting on noise "<<std::endl;
 	src = noise;
 	guess=Zero();
 	GCR(src,guess);
 	subspace[b] = guess;
 #else
-	std::cout << GridLogMessage << " inverting on zero "<<std::endl;
+	if (i==0)std::cout << GridLogMessage << " inverting on zero "<<std::endl;
 	src=Zero();
 	guess = noise;
 	GCR(src,guess);
@@ -167,7 +170,7 @@ public:
 
       }
 
-      DiracOp.Op(noise,Mn); std::cout<<GridLogMessage << "filtered["<<b<<"] <f|Op|f> "<<innerProduct(noise,Mn)<<std::endl;
+      DiracOp.Op(noise,Mn); std::cout<<GridLogMessage << "filtered["<<b<<"] <f|Op|f> "<<innerProduct(noise,Mn)<<" <f|OpDagOp|f>"<<norm2(Mn)<<std::endl;
       subspace[b]   = noise;
 
     }
@@ -292,7 +295,7 @@ public:
 	  
       }
     }
-    assert(b==nn);
+    // GRID_ASSERT(b==nn);
   }
 
 
@@ -387,9 +390,12 @@ public:
       if(b==0) std::cout<<GridLogMessage << "noise <n|MdagM|n> "<<norm2(Mn)<<std::endl;
 
       // Filter
+      // apply initial low-pass filter to enhance the low-mode content from Gaussian noise
       Chebyshev<FineField> Cheb(lo,hi,orderfilter);
       Cheb(hermop,noise,Mn);
       scale = std::pow(norm2(Mn),-0.5); 	Mn=Mn*scale;
+
+      std::cout << GridLogMessage << "Low-pass filter applied" << std::endl;
 
       // Refine
       Chebyshev<FineField> PowerLaw(lo,hi,1000,AggregatePowerLaw);

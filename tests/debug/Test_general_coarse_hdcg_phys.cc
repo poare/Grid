@@ -225,6 +225,7 @@ int main (int argc, char ** argv)
   MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
 
   SchurDiagMooeeOperator<MobiusFermionD, LatticeFermion> HermOpEO(Ddwf);
+  // construct H = Hermitian RB operator from Schur decomposition
 
   typedef HermOpAdaptor<LatticeFermionD> HermFineMatrix;
   HermFineMatrix FineHermOp(HermOpEO);

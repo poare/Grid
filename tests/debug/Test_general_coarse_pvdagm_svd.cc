@@ -275,7 +275,8 @@ int main (int argc, char ** argv)
   LatticeGaugeField Umu(UGrid);
 
   FieldMetaData header;
-  std::string file("ckpoint_lat.4000");
+  // std::string file("ckpoint_lat.4000");
+  std::string file("/Users/patrickoare/libraries/PETSc-Grid/ckpoint_lat.4000");
   NerscIO::readConfiguration(Umu,header,file);
   
   RealD mass=0.01;
