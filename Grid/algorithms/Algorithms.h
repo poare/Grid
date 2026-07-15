@@ -83,5 +83,6 @@ NAMESPACE_CHECK(multigrid);
 
 #include <Grid/algorithms/iterative/KrylovSchur.h>
 #include <Grid/algorithms/iterative/Arnoldi.h>
+#include <Grid/algorithms/iterative/IDRs.h>
 
 #endif

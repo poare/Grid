@@ -84,9 +84,19 @@ class Arnoldi {
       MaxIter = _maxIter;
       Nm = _Nm; Nk = _Nk;
       Nstop = _Nstop;
-      
+
+      // BUGFIX: clear state from any previous call to operator(). Without this a second call
+      // appends to the stale basis and trips the assert(start == basis.size()) in
+      // arnoldiIteration.
+      basis.clear();
+      evecs.clear();
+
       ssq = norm2(v0);
-      RealD approxLambdaMax = approxMaxEval(v0);
+      // BUGFIX: the RealD here declared a local that shadowed the class member of the same
+      // name, so the member stayed at 0.0 (a latent trap for anything else using it, e.g. the
+      // breakdown guard in arnoldiIteration).
+      // RealD approxLambdaMax = approxMaxEval(v0);
+      approxLambdaMax = approxMaxEval(v0);
       rtol = Tolerance * approxLambdaMax;
 
       ComplexComparator compareComplex (ritzFilter);
@@ -107,7 +117,13 @@ class Arnoldi {
         compute_eigensystem(Hess);
         std::cout << GridLogMessage << "Eigenvalues after Arnoldi step: " << std::endl << evals << std::endl;
 
-        std::sort(evals.begin(), evals.end(), compareComplex);
+        // BUGFIX: sorting evals alone breaks the pairing between evals[k], littleEvecs.col(k)
+        // and evecs[k] (Eigen returns eigenvalues and eigenvectors in a matched but arbitrary
+        // order). The implicit-restart shifts evals[Nk..Nm-1] were still correct, but the
+        // convergence test and the returned (eval, evec) pairs were mismatched. Sort an index
+        // permutation and apply it to all three objects together instead.
+        // std::sort(evals.begin(), evals.end(), compareComplex);
+        sortRitzPairs(compareComplex);
         std::cout << GridLogMessage << "Ritz values after sorting (first Nk preserved): " << std::endl << evals << std::endl;
         // SU(N)::tepidConfiguration
 
@@ -119,9 +135,21 @@ class Arnoldi {
         int Nconv = converged();
         std::cout << GridLogMessage << "Number of evecs converged: " << Nconv << std::endl;
         if (Nconv >= Nstop || i == MaxIter - 1) {
-          std::cout << GridLogMessage << "Converged with " << Nconv << " / " << Nstop << " eigenvectors on iteration " 
-                        << i << "." << std::endl;
-          basisRotate(evecs, Qt, 0, Nk, 0, Nk, Nm);
+          // BUGFIX: report failure honestly when we fall out of the loop on MaxIter rather
+          // than claiming convergence.
+          if (Nconv >= Nstop) {
+            std::cout << GridLogMessage << "Converged with " << Nconv << " / " << Nstop << " eigenvectors on iteration "
+                          << i << "." << std::endl;
+          } else {
+            std::cout << GridLogMessage << "NOT converged: only " << Nconv << " / " << Nstop
+                          << " eigenvectors after " << MaxIter << " restart iterations." << std::endl;
+          }
+          // BUGFIX: evecs already holds the Ritz vectors V*S built in compute_eigensystem
+          // (and sorted by sortRitzPairs). The restart rotation Qt maps the old Arnoldi basis
+          // to the new one -- applying it to Ritz vectors has no mathematical meaning, and by
+          // this point it would have been the second rotation applied to them. The first
+          // Nstop entries of evecs/evals are the answer as-is.
+          // basisRotate(evecs, Qt, 0, Nk, 0, Nk, Nm);
           std::cout << GridLogMessage << "Eigenvalues [first " << Nconv << " converged]: " << std::endl << evals << std::endl;
           return;
         }
@@ -146,17 +174,26 @@ class Arnoldi {
     RealD approxMaxEval(const Field& v0, int MAX_ITER = 50) {
       assert (norm2(v0) > 1e-8);                        // must have relatively large source norm to start
       RealD lamApprox = 0.0;
-      RealD denom = 1.0; RealD num = 1.0;
       Field v0cp (Grid); Field tmp (Grid);
-      v0cp = v0;
-      denom = std::sqrt(norm2(v0cp));
+      // BUGFIX: keep the power-iteration vector at unit norm. The previous version let
+      // |A^n v0| grow like lambda_max^n, which overflows double precision after ~50
+      // applications for operators with large spectral radius:
+      // RealD denom = 1.0; RealD num = 1.0;
+      // v0cp = v0;
+      // denom = std::sqrt(norm2(v0cp));
+      // for (int i = 0; i < MAX_ITER; i++) {
+      //   Linop.Op(v0cp, tmp);                            // CAREFUL: do not do Op(tmp, tmp)
+      //   v0cp = tmp;
+      //   num = std::sqrt(norm2(v0cp));                   // num = |A^{n+1} v0|
+      //   lamApprox = num / denom;                        // lam = |A^{n+1} v0| / |A^n v0|
+      //   denom = num;                                    // denom = |A^{n} v0|
+      // }
+      v0cp = (1.0 / std::sqrt(norm2(v0))) * v0;            // unit-norm starting vector
       for (int i = 0; i < MAX_ITER; i++) {
         Linop.Op(v0cp, tmp);                               // CAREFUL: do not do Op(tmp, tmp)
-        v0cp = tmp;
-        num = std::sqrt(norm2(v0cp));                      // num = |A^{n+1} v0|
-        lamApprox = num / denom;                           // lam = |A^{n+1} v0| / |A^n v0|
+        lamApprox = std::sqrt(norm2(tmp));                 // |A v| for unit v -> lambda_max
+        v0cp = (1.0 / lamApprox) * tmp;                    // renormalize for the next application
         std::cout << GridLogDebug << "Approx for max eval: " << lamApprox << std::endl;
-        denom = num;                                       // denom = |A^{n} v0|
       }
       return lamApprox;
     }
@@ -205,13 +242,29 @@ class Arnoldi {
           w -= coeff * basis[j];
         }
 
+        // BUGFIX (was an empty TODO): second orthogonalization pass. A single Gram-Schmidt
+        // pass loses orthogonality when the new direction is nearly contained in the span of
+        // the current basis; the standard cure ("twice is enough", Kahan/Parlett) is to
+        // orthogonalize a second time and accumulate the (small) corrections into the same
+        // Hessenberg column.
         if (doubleOrthog) {
-          // TODO implement
+          for (int j = 0; j < basis.size(); j++) {
+            coeff = innerProduct(basis[j], w);
+            Hess(j, i) += coeff;
+            w -= coeff * basis[j];
+          }
         }
 
         // add w_i to the pile
         if (i < Nm - 1) {
           coeff = std::sqrt(norm2(w));
+          // BUGFIX: guard against "happy breakdown" (||w|| ~ 0 means an exact invariant
+          // subspace has been found). Dividing by ~0 below would inject a garbage vector into
+          // the basis; deflating the invariant subspace is not implemented, so stop loudly
+          // rather than silently corrupting the factorization. (approxLambdaMax is 0 if
+          // arnoldiIteration is called outside operator(), in which case this only catches an
+          // exact zero.)
+          assert(std::abs(coeff) > 1e-14 * approxLambdaMax);
           Hess(i+1, i) = coeff;
           basis.push_back(
             (1.0/coeff) * w
@@ -269,8 +322,38 @@ class Arnoldi {
     }
 
     /**
-     * Verifies the factorization DV = V^\dag H + f e^\dag with the last-computed 
-     * V, H, f. 
+     * BUGFIX (new function): sorts the Ritz pairs (evals[k], littleEvecs.col(k), evecs[k])
+     * simultaneously with the given comparator, preserving the pairing between eigenvalues and
+     * eigenvectors. Replaces the bare std::sort of evals in operator(), which silently
+     * decoupled the eigenvalues from their eigenvectors. After this call the first Nk pairs
+     * are the "wanted" ones and evals[Nk..Nm-1] are the unwanted values used as exact shifts
+     * in the implicit restart.
+     */
+    void sortRitzPairs(ComplexComparator& compare) {
+      // Sort a permutation of the indices rather than the eigenvalues themselves.
+      std::vector<int> perm(evals.size());
+      for (int k = 0; k < evals.size(); k++) perm[k] = k;
+      std::sort(perm.begin(), perm.end(),
+                [&](int a, int b) { return compare(evals[a], evals[b]); });
+
+      // Apply the permutation to all three objects together.
+      Eigen::VectorXcd sortedEvals(evals.size());
+      Eigen::MatrixXcd sortedLittleEvecs(littleEvecs.rows(), littleEvecs.cols());
+      std::vector<Field> sortedEvecs;
+      sortedEvecs.reserve(evecs.size());
+      for (int k = 0; k < evals.size(); k++) {
+        sortedEvals[k] = evals[perm[k]];
+        sortedLittleEvecs.col(k) = littleEvecs.col(perm[k]);
+        sortedEvecs.push_back(evecs[perm[k]]);
+      }
+      evals = sortedEvals;
+      littleEvecs = sortedLittleEvecs;
+      evecs = sortedEvecs;
+    }
+
+    /**
+     * Verifies the factorization DV = V^\dag H + f e^\dag with the last-computed
+     * V, H, f.
      */
     // RealD verifyFactorization() {
     //   int k = basis.size();         // number of basis vectors, also the size of H.
@@ -330,26 +413,46 @@ class Arnoldi {
 
       std::cout << GridLogDebug << "Hess after all rotations: " << std::endl << Hess << std::endl; 
 
-      // form Arnoldi vector f: f is normal to the basis vectors and its norm \beta is used to determine the Ritz estimate. 
+      // Restarted residual: f_+ = (V Q) e_{k+1} * beta + f * sigma  (Sorensen), with
+      // beta = Hhat(k+1, k) and sigma = Q(m, k) in 1-based notation.
       std::complex<double> beta = Hess(Nk, Nk-1);
       std::complex<double> sigma = Q(Nm-1, Nk-1);
-      f = basis[Nk] * beta + f * sigma;
-      RealD betak = std::sqrt(norm2(f));
-      std::cout << GridLogMessage << "|f|^2 after implicit restart = " << norm2(f) << std::endl;
 
-      // Rotate basis by Qt
+      // Rotate basis by Qt: basisRotate sets basis[j] <- sum_k Qt(j,k) basis[k] = (V Q)(:, j),
+      // for the leading Nk+1 columns (we need column Nk for f_+ below).
       Qt = Q.transpose();
       basisRotate(basis, Qt, 0, Nk + 1, 0, Nm, Nm);
 
-      // rotate
-      basisRotate(evecs, Qt, 0, Nk + 1, 0, Nm, Nm);
+      // BUGFIX: f_+ must be built from the ROTATED vector (V Q) e_{k+1}, so this update has to
+      // come after the basisRotate above. Previously it ran before the rotation and used the
+      // un-rotated basis[Nk]:
+      // f = basis[Nk] * beta + f * sigma;
+      f = basis[Nk] * beta + f * sigma;
+      // BUGFIX: removed a dead local that shadowed nothing and was never read:
+      // RealD betak = std::sqrt(norm2(f));
+      // Note that the member beta_k is deliberately NOT updated here: the Ritz estimates in
+      // converged() pair ||f_m|| from the m-step factorization (set in arnoldiIteration) with
+      // the last components littleEvecs(Nm-1, k) of the m x m Hessenberg eigenvectors -- both
+      // pre-restart quantities. Overwriting beta_k with ||f_+|| would corrupt that test.
+      std::cout << GridLogMessage << "|f|^2 after implicit restart = " << norm2(f) << std::endl;
+
+      // BUGFIX: do not rotate the Ritz vectors. Q maps the old Arnoldi basis onto the new one;
+      // applying it to evecs = V*S is not a meaningful operation. evecs is rebuilt from
+      // scratch in compute_eigensystem on the next iteration anyway, and at convergence the
+      // (sorted) evecs from compute_eigensystem are already the answer.
+      // basisRotate(evecs, Qt, 0, Nk + 1, 0, Nm, Nm);
 
       // Truncate the basis and restart
       basis = std::vector<Field> (basis.begin(), basis.begin() + Nk);
       // evecs = std::vector<Field> (evecs.begin(), evecs.begin() + Nk);
-      Hess = Hess(Eigen::seqN(0, Nk), Eigen::seqN(0, Nk));
+      // BUGFIX: added .eval(). Assigning a block of Hess to itself resizes the destination
+      // while the block expression still references the old storage -- undefined behaviour in
+      // Eigen (may work on one platform and corrupt memory on another). .eval() forces the
+      // block into a temporary before the assignment.
+      // Hess = Hess(Eigen::seqN(0, Nk), Eigen::seqN(0, Nk));
+      Hess = Hess(Eigen::seqN(0, Nk), Eigen::seqN(0, Nk)).eval();
 
-      std::cout << "evecs size: " << evecs.size() << std::endl;
+      std::cout << GridLogDebug << "evecs size: " << evecs.size() << std::endl;
 
     }
   
@@ -368,10 +471,15 @@ class Arnoldi {
      */
     int converged() {
       int Nconv = 0;
-      for (int k = 0; k < evecs.size(); k++) {
+      // BUGFIX: only test the wanted (leading, post-sort) Ritz pairs. Looping over all Nm
+      // pairs let converged *unwanted* Ritz values -- typically exterior ones, which converge
+      // fastest -- count towards the Nconv >= Nstop stopping test, so the iteration could
+      // terminate before any wanted pair had actually converged.
+      // for (int k = 0; k < evecs.size(); k++) {
+      int Nwanted = std::min((int)evecs.size(), Nstop);
+      for (int k = 0; k < Nwanted; k++) {
         RealD emTs = std::abs(littleEvecs(Nm - 1, k));           // e_m^T s
-        RealD ritzEstimate = beta_k * emTs;
-        // TODO should be ritzEstimate < Tolerance * lambda_max
+        RealD ritzEstimate = beta_k * emTs;                      // ||A x - theta x|| = ||f_m|| |e_m^T s|
         std::cout << GridLogMessage << "Ritz estimate for evec " << k << " = " << ritzEstimate << std::endl;
         if (ritzEstimate < rtol) {
           Nconv++;
