@@ -250,10 +250,10 @@ public:
         // Breakdown check: if M(k,k) is too small, beta = f(k)/M(k,k) would
         // blow up. Break to the outer polynomial step; f = P^H r is recomputed
         // there, effectively restarting the inner loop from the current residual.
-        if (std::abs(M(k, k)) < 1.0e-10 * std::sqrt(norm2(G[k]))) {
+        if (abs(M(k, k)) < 1.0e-10 * std::sqrt(norm2(G[k]))) {
           std::cout << GridLogMessage << "IDR(s=" << s << "): breakdown at outer "
                     << iter << " inner " << k
-                    << " |M(k,k)| = " << std::abs(M(k, k))
+                    << " |M(k,k)| = " << abs(M(k, k))
                     << " — refreshing shadow space" << std::endl;
           // The shadow space P has become (nearly) orthogonal to D*G[k], so
           // biorthogonalisation has broken down. Re-draw P randomly (using a
@@ -300,7 +300,7 @@ public:
         // All entries must be updated so the LU solve at the next inner step
         // uses the correct f = P^H r throughout the loop.
         for (int j = 0; j < s; j++) {
-          f(j) = f(j) - beta * M(j, k);
+          f(j) = f(j) - std::complex<double>(beta) * M(j, k);
         }
 
       } // end inner loop

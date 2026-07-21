@@ -250,7 +250,7 @@ class Arnoldi {
         if (doubleOrthog) {
           for (int j = 0; j < basis.size(); j++) {
             coeff = innerProduct(basis[j], w);
-            Hess(j, i) += coeff;
+            Hess(j, i) += std::complex<double>(coeff);
             w -= coeff * basis[j];
           }
         }
@@ -264,7 +264,7 @@ class Arnoldi {
           // rather than silently corrupting the factorization. (approxLambdaMax is 0 if
           // arnoldiIteration is called outside operator(), in which case this only catches an
           // exact zero.)
-          assert(std::abs(coeff) > 1e-14 * approxLambdaMax);
+          assert(abs(coeff) > 1e-14 * approxLambdaMax);
           Hess(i+1, i) = coeff;
           basis.push_back(
             (1.0/coeff) * w
@@ -478,7 +478,7 @@ class Arnoldi {
       // for (int k = 0; k < evecs.size(); k++) {
       int Nwanted = std::min((int)evecs.size(), Nstop);
       for (int k = 0; k < Nwanted; k++) {
-        RealD emTs = std::abs(littleEvecs(Nm - 1, k));           // e_m^T s
+        RealD emTs = abs(littleEvecs(Nm - 1, k));           // e_m^T s
         RealD ritzEstimate = beta_k * emTs;                      // ||A x - theta x|| = ||f_m|| |e_m^T s|
         std::cout << GridLogMessage << "Ritz estimate for evec " << k << " = " << ritzEstimate << std::endl;
         if (ritzEstimate < rtol) {
