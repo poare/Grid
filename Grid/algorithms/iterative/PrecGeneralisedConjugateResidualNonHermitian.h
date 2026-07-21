@@ -410,7 +410,7 @@ public:
     for(int i = 0; i < k; i++) {
       polynomial[i] += a * poly_p[k-1][i];
     }
-    PF.data.push_back(polynomial);
+    PF.data.push_back(std::vector<std::complex<double>>(polynomial.begin(), polynomial.end()));
 
     //  r_{k+1} --> r_k - a_k A p_k
     //  p_{k+1} --> r_k + \sum_{i=0}^k \beta_{ik} p_i, input betas = (\beta_{ik})_i
@@ -437,7 +437,7 @@ public:
     std::cout << "PGCR::LogComplete() "<<std::endl;
     for (int i = 0; i < alphas.size(); i++) {
       PF.alphas.push_back(alphas[i]);
-      PF.betas.push_back(betas[i]);
+      PF.betas.push_back(std::vector<std::complex<double>>(betas[i].begin(), betas[i].end()));
     }
   };
 

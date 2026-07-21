@@ -489,8 +489,8 @@ int main (int argc, char ** argv)
   std::string path2 = dir + "relax_" + std::to_string(maxit) + ".xml";
   // std::cout << "Writing coeffs to file at " << path << std::endl;
 
-  TestSubspace<LatticeFermionD>(PVdagM, psi1, noise1, coeffs1, FGrid, maxit, path1, true);      // standard
-  TestSubspace<LatticeFermionD>(PVdagM, psi2, noise2, coeffs2, FGrid, maxit, path2, false);     // christoph
+  // TestSubspace<LatticeFermionD>(PVdagM, psi1, noise1, coeffs1, FGrid, maxit, path1, true);      // standard
+  // TestSubspace<LatticeFermionD>(PVdagM, psi2, noise2, coeffs2, FGrid, maxit, path2, false);     // christoph
 
   // std::vector<std::complex<double>> coeffs1p (maxit);
   // std::vector<std::complex<double>> coeffs2p (maxit);

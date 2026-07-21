@@ -252,6 +252,8 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "********** TESTING CG POLY COEFFS *********" << std::endl;
   std::cout << GridLogMessage << "*******************************************" << std::endl << std::endl;
 
+  /*
+
   double tol = 1.0e-8;
   int N = 5;           // max iterations (size of Krylov basis)
 
@@ -345,6 +347,8 @@ int main (int argc, char ** argv)
   // for GCR with alpha / beta computation
   krylovApprox(psiPrime, src, DLinOp, gcr_coeffs);
   std::cout << "GCR direct with Dsq, ||psi - psiPrime||^2 = " << norm2(psiGCR - psiPrime) << std::endl;
+
+  */
 
   // TESTS TO DO THE N = 2 CASE DIRECTLY
   /*

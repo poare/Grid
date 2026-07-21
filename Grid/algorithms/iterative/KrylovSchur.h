@@ -108,6 +108,7 @@ struct ComplexComparator
         return std::abs(std::imag(z1)) > std::abs(std::imag(z2));
       default:
         assert(0);
+        return false;   // unreachable; silences missing-return warning
     }
   }
 };
@@ -198,14 +199,14 @@ class ComplexSchurDecomposition {
       s    = S(i, i+1);
       lam1 = S(i, i);
       lam2 = S(i+1, i+1);
-      phi  = s / std::abs(s);
-      r    = std::sqrt(std::pow(std::abs(s), 2) + std::pow(std::abs(lam2 - lam1), 2));
+      phi  = s / abs(s);
+      r    = std::sqrt(std::pow(abs(s), 2) + std::pow(abs(lam2 - lam1), 2));
 
       // Modified code
       Givens = CMat::Identity(2, 2);
-      Givens(0, 0)     = std::abs(s) / r;
+      Givens(0, 0)     = abs(s) / r;
       Givens(1, 1) = Givens(0, 0);
-      Givens(0, 1)   = (phi / r) * std::conj(lam2 - lam1);
+      Givens(0, 1)   = (phi / r) * conj(lam2 - lam1);
       Givens(1, 0)   = -std::conj(Givens(0, 1));
 
       // TODO: make sure these are correct
@@ -457,7 +458,7 @@ class KrylovSchur {
           std::cout << GridLogMessage << "Double orthogonalizing." << std::endl;
           for (int j = 0; j < basis.size(); j++) {
             coeff = innerProduct(basis[j], w);      // see if there is any residual component in basis[j] direction
-            Rayleigh(j, i) += coeff;                // if coeff is non-zero, adjust Rayleigh
+            Rayleigh(j, i) += std::complex<double>(coeff);  // if coeff is non-zero, adjust Rayleigh
             w -= coeff * basis[j];
           }
         }
