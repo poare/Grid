@@ -63,13 +63,15 @@ class Arnoldi {
     Eigen::MatrixXcd littleEvecs;           // Nm x Nm evecs matrix
     std::vector<Field> evecs;               // Vector of evec fields
 
+    int matvecs;
+
     RitzFilter ritzFilter;                        // how to sort evals
 
   public:       
 
     Arnoldi(LinearOperatorBase<Field> &_Linop, GridBase *_Grid, RealD _Tolerance, RitzFilter filter = EvalReSmall)
       : Linop(_Linop), Grid(_Grid), Tolerance(_Tolerance), ritzFilter(filter), f(_Grid), MaxIter(-1), Nm(-1), Nk(-1), 
-          Nstop (-1), evals (0), evecs (), ssq (0.0), rtol (0.0), beta_k (0.0), approxLambdaMax (0.0)
+          Nstop (-1), evals (0), evecs (), ssq (0.0), rtol (0.0), beta_k (0.0), approxLambdaMax (0.0), matvecs (0)
     {
       f = Zero();
     };
@@ -236,6 +238,7 @@ class Arnoldi {
       for (int i = start - 1; i < Nm; i++) {
 
         Linop.Op(basis.back(), w);
+        matvecs++;
         for (int j = 0; j < basis.size(); j++) {
           coeff = innerProduct(basis[j], w);       // coeff = h_{ij}. Note that since {vi} is ONB it's OK to subtract it off after. 
           Hess(j, i) = coeff;
@@ -276,6 +279,7 @@ class Arnoldi {
         beta_k = std::sqrt(norm2(f));         // beta_k = ||f_k|| determines convergence.
       }
 
+      std::cout << GridLogMessage << "Matvecs: " << matvecs << std::endl;
       std::cout << GridLogMessage << "|f|^2 after Arnoldi step = " << norm2(f) << std::endl;
       std::cout << GridLogDebug << "Computed Hessenberg matrix = " << std::endl << Hess << std::endl;
 

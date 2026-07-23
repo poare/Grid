@@ -331,7 +331,8 @@ int main (int argc, char ** argv)
 
   FieldMetaData header;
 //   std::string file("ckpoint_lat.4000");
-  std::string file("/Users/patrickoare/libraries/PETSc-Grid/ckpoint_lat.4000");
+  // std::string file("/Users/patrickoare/libraries/PETSc-Grid/ckpoint_lat.4000");
+  std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
   NerscIO::readConfiguration(Umu,header,file);
 
   RealD mass=0.01;
@@ -362,72 +363,6 @@ int main (int argc, char ** argv)
   SquaredLinearOperator<DomainWallFermionD, LatticeFermionD> Dsq (Ddwf);
   NonHermitianLinearOperator<DomainWallFermionD, LatticeFermionD> DLinOp (Ddwf);
 
-  // PowerMethod<LatticeFermion> PM; PM(PVdagM, src);
-  int Nm = 10;
-  int Nk = 6;
-  // int Nm = 6;         // Nm = 6 case is acting really strangely... with Nm = 6 and Nm = 3 it zeros out the Hessenberg and also makes it imaginary?
-  // int Nk = 2;
-  // int Nk = Nm+1;     // if just running once
-  // int maxIter = 5;
-  // int maxIter = 1;
-  int maxIter = 3;
-  // int maxIter = 100;
-  int Nstop = 6;
-
-  Coordinate origin ({0,0,0,0});
-  auto tmpSrc = peekSite(src, origin);
-  std::cout << "[DEBUG] Source at origin = " <<  tmpSrc << std::endl;
-  LatticeFermion src2 = src;
-
-  // Run Lanczos and Arnoldi on a Hermitian matrix
-  // Arnoldi Arn (Dsq, FGrid, 1e-8, false);
-  // Arn(src, 1, Nm, -1);
-  Arnoldi Arn (Dsq, FGrid, 1e-8, EvalNormLarge);      // for comparison to Lanczos
-  // Arn(src, maxIter, Nm, Nk, Nstop);
-
-  // auto tmpSrcDup = peekSite(src, origin);
-  // std::cout << "[DEBUG] Source at origin = " <<  tmpSrcDup << std::endl;
-  // auto tmpSrc2Dup = peekSite(src2, origin);
-  // std::cout << "[DEBUG] Source2 at origin = " <<  tmpSrc2Dup << std::endl;
-
-  Arn(src, maxIter, Nm, Nk, Nstop);
-  std::cout << "Hessenberg mat for symmetric N = " << Nm << std::endl;
-  std::cout << Arn.getHessenbergMat() << std::endl;
-
-  // ImplicitlyRestartedLanczosHermOpTester<LatticeFermionD> SimpleTester (Dsq);
-  // ImplicitlyRestartedLanczos<LatticeFermionD> Lanc (Dsq, Dsq, SimpleTester, Nm, Nm, Nm, 1e-8, Nm);
-  int Nconv;
-  PlainHermOp DsqHermOp (Dsq);
-  // std::vector<RealD> levals (Nm+1); std::vector<LatticeFermionD> levecs (Nm+1, src);
-  // ImplicitlyRestartedLanczos<LatticeFermionD> Lanc (DsqHermOp, DsqHermOp, Nm, Nm, Nm + 1, 1e-8, Nm);
-  std::vector<RealD> levals (Nm+1); std::vector<LatticeFermionD> levecs (Nm, src);
-  ImplicitlyRestartedLanczos<LatticeFermionD> Lanc (DsqHermOp, DsqHermOp, Nstop, Nk, Nm, 1e-8, maxIter);
-  std::cout << GridLogMessage << "Calculating with Lanczos" << std::endl;
-
-  // auto tmpSrc1 = peekSite(src, origin);
-  // std::cout << "[DEBUG] Source at origin = " <<  tmpSrc1 << std::endl;
-  // auto tmpSrc2 = peekSite(src2, origin);
-  // std::cout << "[DEBUG] Source2 at origin = " <<  tmpSrc2 << std::endl;
-  // std::cout << "[DEBUG] Source norm2: " << norm2(src) << std::endl;
-
-  std::cout << "running Lanczos now" << std::endl;
-  // [claude] Gated behind a flag: ImplicitlyRestartedLanczos::calc() calls abort() if it fails
-  // to converge within maxIter restarts (which it cannot with maxIter = 3 and target 1e-8),
-  // killing the program before the Wilson-operator comparison below ever runs. Set
-  // runLanczos = true to re-enable the Lanczos cross-check.
-  // Lanc.calc(levals, levecs, src2, Nconv);
-  bool runLanczos = false;
-  if (runLanczos) {
-    Lanc.calc(levals, levecs, src2, Nconv);
-  }
-
-  std::cout<<GridLogMessage << "*******************************************" << std::endl;
-  std::cout<<GridLogMessage << "***************** RESULTS *****************" << std::endl;
-  std::cout<<GridLogMessage << "*******************************************" << std::endl;
-
-  std::cout << GridLogMessage << "Arnoldi eigenvalues: " << std::endl << Arn.getEvals() << std::endl;
-  std::cout << GridLogMessage << "Lanczos eigenvalues: " << std::endl << levals << std::endl;
-
   //////////////////////////////////////////////////////////////////////////////////////////////
   // Arnoldi vs Krylov-Schur cross-check on the (non-Hermitian) 4d Wilson operator.
   // Both solvers seek the largest-modulus eigenvalues of Dw at m = 0.01 on the same gauge
@@ -447,29 +382,29 @@ int main (int argc, char ** argv)
   LatticeFermionD src4(UGrid);
   random(RNG4, src4);
 
-  int NmW = 10;         // total Krylov basis size
-  int NkW = 6;         // basis vectors kept at each restart
-  int NstopW = 4;       // stop once NstopW eigenvalues have converged
-  int maxIterW = 5000;  // generous restart budget; both solvers return early on convergence
+  int NmW = 64;         // total Krylov basis size
+  int NkW = 32;         // basis vectors kept at each restart
+  int NstopW = 28;       // stop once NstopW eigenvalues have converged
+  int maxIterW = 10000;  // generous restart budget; both solvers return early on convergence
 
   std::cout << GridLogMessage << "Running Arnoldi on Dw" << std::endl;
   // EvalNormLarge for the cross-check: largest-modulus eigenvalues are strongly exterior for
   // the Wilson operator, so both solvers converge quickly. (EvalReSmall stagnates at this
   // subspace size -- the lowest-Re eigenvalues sit at the edge of the dense spectral bulk.)
   // Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
-  Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalNormLarge);
+  Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
   ArnW(src4, maxIterW, NmW, NkW, NstopW, true);   // doubleOrthog on, matching the KrylovSchur default
 
   std::cout << GridLogMessage << "Running KrylovSchur on Dw" << std::endl;
   // KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
-  KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalNormLarge);
+  KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
   KS(src4, maxIterW, NmW, NkW, NstopW);
 
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
   std::cout<<GridLogMessage << "***** WILSON RESULTS (m = 0.01) ***********" << std::endl;
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
-  std::cout << GridLogMessage << "Arnoldi Wilson eigenvalues (largest |lambda|): " << std::endl << ArnW.getEvals() << std::endl;
-  std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (largest |lambda|): " << std::endl << KS.getEvals() << std::endl;
+  std::cout << GridLogMessage << "Arnoldi Wilson eigenvalues (Smallest Re lambda): " << std::endl << ArnW.getEvals() << std::endl;
+  std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (Smallest Re lambda): " << std::endl << KS.getEvals() << std::endl;
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;

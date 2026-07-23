@@ -294,13 +294,15 @@ class KrylovSchur {
     Eigen::MatrixXcd   littleEvecs;         // Nm x Nm evecs matrix
     std::vector<Field> evecs;               // Vector of evec fields
 
+    int matvecs;
+
     RitzFilter ritzFilter;                  // how to sort evals
 
   public:       
 
     KrylovSchur(LinearOperatorBase<Field> &_Linop, GridBase *_Grid, RealD _Tolerance, RitzFilter filter = EvalReSmall)
       : Linop(_Linop), Grid(_Grid), Tolerance(_Tolerance), ritzFilter(filter), u(_Grid), MaxIter(-1), Nm(-1), Nk(-1), Nstop (-1),
-        evals (0), ritzEstimates (), evecs (), ssq (0.0), rtol (0.0), beta_k (0.0), approxLambdaMax (0.0)
+        evals (0), ritzEstimates (), evecs (), ssq (0.0), rtol (0.0), beta_k (0.0), approxLambdaMax (0.0), matvecs (0)
     {
       u = Zero();
     };
@@ -314,6 +316,8 @@ class KrylovSchur {
     Eigen::VectorXcd    getEvals()             { return evals;         }
     std::vector<RealD>  getRitzEstimates()     { return ritzEstimates; }
     std::vector<Field>  getEvecs()             { return evecs;         }
+    Eigen::VectorXcd    getB()                 { return b;             }
+    RealD               getBeta()              { return beta_k;        }
 
     /**
      * Runs the Krylov-Schur loop.
@@ -448,6 +452,7 @@ class KrylovSchur {
       // Construct next Arnoldi vector by normalizing w_i = Dv_i - \sum_j v_j h_{ji}
       for (int i = start; i < Nm; i++) {
         Linop.Op(basis.back(), w);
+        matvecs++;
         for (int j = 0; j < basis.size(); j++) {
           coeff = innerProduct(basis[j], w);       // coeff = h_{ij}. Note that since {vi} is ONB it's OK to subtract it off after. 
           Rayleigh(j, i) = coeff;
@@ -480,7 +485,7 @@ class KrylovSchur {
 
       b(Nm - 1) = beta_k;
 
-      // std::cout << GridLogMessage << "|f|^2 after Arnoldi step = " << norm2(f) << std::endl;
+      std::cout << GridLogMessage << "Matvecs: " << matvecs << std::endl;
       std::cout << GridLogMessage << "beta_k = |u| (before norm) after Arnoldi step = " << beta_k << std::endl;
       std::cout << GridLogDebug << "Computed Rayleigh quotient = " << std::endl << Rayleigh << std::endl;
 
