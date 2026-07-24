@@ -9,6 +9,7 @@ Copyright (C) 2015
 Author: Peter Boyle <paboyle@ph.ed.ac.uk>
 Author: paboyle <paboyle@ph.ed.ac.uk>
 Author: Patrick Oare <poare@bnl.gov>
+Author: Chulwoo Jung <chulwoo@bnl.gov>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -30,7 +31,30 @@ See the full license in the file "LICENSE" in the top level distribution directo
 #ifndef GRID_KRYLOVSCHUR_H
 #define GRID_KRYLOVSCHUR_H
 
-NAMESPACE_BEGIN(Grid); 
+NAMESPACE_BEGIN(Grid);
+
+#if defined(GRID_CUDA) || defined(GRID_HIP)
+using thrust::abs;
+using thrust::conj;
+inline std::complex<double> toStdCmplx(const ComplexD& c) { return {c.real(), c.imag()}; }
+#else
+using std::abs;
+using std::conj;
+inline const ComplexD& toStdCmplx(const ComplexD& c) { return c; }
+#endif
+
+/**
+ * Small dense coefficient matrix of ComplexD (thrust::complex on GPU builds)
+ * for passing to basisRotate, whose device kernel cannot multiply Grid tensors
+ * by std::complex. Must be namespace-scope: nvcc rejects function-local types
+ * as template arguments to functions containing extended device lambdas.
+ */
+struct KSCoeffMat {
+  std::vector<ComplexD> a; int n;
+  KSCoeffMat(int _n) : a(_n*_n), n(_n) {}
+  ComplexD&       operator()(int i, int j)       { return a[i*n+j]; }
+  const ComplexD& operator()(int i, int j) const { return a[i*n+j]; }
+};
 
 /**
  * Options for which Ritz values to keep in implicit restart. TODO move this and utilities into a new file
@@ -40,6 +64,7 @@ enum RitzFilter {
   EvalNormLarge,           // Keep evals with largest norm
   EvalReSmall,             // Keep evals with smallest real part
   EvalReLarge,             // Keep evals with largest real part
+  EvalReNormLarge,         // Keep evals with largest real part
   EvalImSmall,             // Keep evals with smallest imaginary part
   EvalImLarge,             // Keep evals with largest imaginary part
   EvalImNormSmall,         // Keep evals with smallest |imaginary| part
@@ -52,6 +77,7 @@ inline RitzFilter selectRitzFilter(std::string s) {
   if (s == "EvalNormLarge")   { return EvalNormLarge; }   else
   if (s == "EvalReSmall")     { return EvalReSmall; }     else
   if (s == "EvalReLarge")     { return EvalReLarge; }     else
+  if (s == "EvalReNormLarge")     { return EvalReNormLarge; }     else
   if (s == "EvalImSmall")     { return EvalImSmall; }     else
   if (s == "EvalImLarge")     { return EvalImLarge; }     else 
   if (s == "EvalImNormSmall") { return EvalImNormSmall; } else
@@ -70,6 +96,8 @@ inline std::string rfToString(RitzFilter RF) {
       return "EvalReSmall";
     case EvalReLarge:
       return "EvalReLarge";
+    case EvalReNormLarge:
+      return "EvalReNormLarge";
     case EvalImSmall:
       return "EvalImSmall";
     case EvalImLarge:
@@ -89,6 +117,10 @@ struct ComplexComparator
   RitzFilter RF;
   ComplexComparator (RitzFilter _rf) : RF(_rf) {}
   bool operator()(std::complex<double> z1, std::complex<double> z2) { 
+	  RealD tmp1=std::abs(std::imag(z1));
+	  RealD tmp2=std::abs(std::imag(z2));
+	  if ( std::abs(std::real(z1)) >2.) tmp1 += 100.;
+	  if ( std::abs(std::real(z2)) >2.) tmp2 += 100.;
     switch (RF) {
       case EvalNormSmall:
         return std::abs(z1) < std::abs(z2);
@@ -98,17 +130,19 @@ struct ComplexComparator
         return std::real(z1) < std::real(z2);     // DELETE THE ABS HERE!!!
       case EvalReLarge:
         return std::real(z1) > std::real(z2);
+      case EvalReNormLarge:
+        return std::abs(std::real(z1)) < std::abs(std::real(z2));
       case EvalImSmall:
         return std::imag(z1) < std::imag(z2);
       case EvalImLarge:
         return std::imag(z1) > std::imag(z2);
       case EvalImNormSmall:
-        return std::abs(std::imag(z1)) < std::abs(std::imag(z2));
+//        return std::abs(std::imag(z1)) < std::abs(std::imag(z2));
+          return tmp1 < tmp2 ;
       case EvalImNormLarge:
         return std::abs(std::imag(z1)) > std::abs(std::imag(z2));
       default:
         assert(0);
-        return false;   // unreachable; silences missing-return warning
     }
   }
 };
@@ -202,12 +236,23 @@ class ComplexSchurDecomposition {
       phi  = s / abs(s);
       r    = std::sqrt(std::pow(abs(s), 2) + std::pow(abs(lam2 - lam1), 2));
 
+      // // Original code which performs Givens rotations by manual matrix multiplication
+      // // compute Givens rotation corresponding to these parameters
+      // Givens = CMat::Identity(Nm, Nm);
+      // Givens(i, i)     = std::abs(s) / r;
+      // Givens(i+1, i+1) = Givens(i, i);
+      // Givens(i, i+1)   = (phi / r) * std::conj(lam2 - lam1);
+      // Givens(i+1, i)   = -std::conj(Givens(i, i+1));
+      // // rotate Schur matrix and unitary change of basis matrix Q
+      // S = Givens * S * Givens.adjoint();
+      // Q = Givens * Q;
+
       // Modified code
       Givens = CMat::Identity(2, 2);
       Givens(0, 0)     = abs(s) / r;
       Givens(1, 1) = Givens(0, 0);
       Givens(0, 1)   = (phi / r) * conj(lam2 - lam1);
-      Givens(1, 0)   = -std::conj(Givens(0, 1));
+      Givens(1, 0)   = -conj(Givens(0, 1));
 
       // TODO: make sure these are correct
       Eigen::MatrixXcd tmp;
@@ -234,13 +279,23 @@ class ComplexSchurDecomposition {
      */
     // void schurReorder(int Nk, std::function compare) {
     void schurReorder(int Nk) {
+     std::cout << GridLogMessage << "schurReorder start " << std::endl;
+     int nswap=0;
       for (int i = 0; i < Nk; i++) {
         for (int k = 0; k <= Nm - 2; k++) {
           int idx = Nm - 2 - k;
-          if ( cCompare(S(idx+1, idx+1), S(idx, idx)) ) {            // sort by function cCompare of eigenvalue
+          // TODO use RitzFilter enum here
+          // if (std::abs(S(idx, idx)) < std::abs(S(idx+1, idx+1))) {            // sort by largest modulus of eigenvalue
+          // if (std::real(S(idx, idx)) > std::real(S(idx+1, idx+1))) {        // sort by smallest real eigenvalue
+          if ( cCompare(S(idx+1, idx+1), S(idx, idx)) ) {            // sort by largest modulus of eigenvalue
             swapEvals(idx);
+	    nswap++;
           }
         }
+      }
+     std::cout << GridLogMessage << "schurReorder end "<< nswap << std::endl;
+      for (int i = 0; i < Nk; i++) {
+      	std::cout << GridLogMessage << "schurR "<<i<<" "<<S(i,i) << std::endl;
       }
       return;
     }
@@ -292,13 +347,13 @@ class KrylovSchur {
     Eigen::VectorXcd   evals;               // evals of Rayleigh quotient
     std::vector<RealD> ritzEstimates;       // corresponding ritz estimates for evals
     Eigen::MatrixXcd   littleEvecs;         // Nm x Nm evecs matrix
-    std::vector<Field> evecs;               // Vector of evec fields
-
-    int matvecs;
 
     RitzFilter ritzFilter;                  // how to sort evals
 
-  public:       
+    int matvecs;                            // matvecs performed during run
+
+  public:
+    bool doEvalCheck = false;
 
     KrylovSchur(LinearOperatorBase<Field> &_Linop, GridBase *_Grid, RealD _Tolerance, RitzFilter filter = EvalReSmall)
       : Linop(_Linop), Grid(_Grid), Tolerance(_Tolerance), ritzFilter(filter), u(_Grid), MaxIter(-1), Nm(-1), Nk(-1), Nstop (-1),
@@ -306,6 +361,7 @@ class KrylovSchur {
     {
       u = Zero();
     };
+    std::vector<Field> evecs;               // Vector of evec fields
 
 
     /* Getters */
@@ -320,17 +376,19 @@ class KrylovSchur {
     RealD               getBeta()              { return beta_k;        }
 
     /**
-     * Runs the Krylov-Schur loop.
+     * Runs the non-harmonic Krylov-Schur loop.
      *   - Runs an Arnoldi step to generate the Rayleigh quotient and Krylov basis.
-     *   - Schur decompose the Rayleigh quotient. 
-     *   - Permutes the Rayleigh quotient according to the eigenvalues. 
-     *   - Truncate the Krylov-Schur expansion. 
+     *   - Schur decompose the Rayleigh quotient.
+     *   - Permutes the Rayleigh quotient according to the eigenvalues.
+     *   - Truncate the Krylov-Schur expansion.
      */
     void operator()(const Field& v0, int _maxIter, int _Nm, int _Nk, int _Nstop, bool doubleOrthog = true) {
+
       MaxIter = _maxIter;
       Nm = _Nm; Nk = _Nk;
       Nstop = _Nstop;
-      
+      matvecs = 0;
+
       ssq = norm2(v0);
       RealD approxLambdaMax = approxMaxEval(v0);
       rtol = Tolerance * approxLambdaMax;
@@ -347,10 +405,13 @@ class KrylovSchur {
 
         // Perform Arnoldi steps to compute Krylov basis and Rayleigh quotient (Hess)
         arnoldiIteration(startVec, Nm, start, doubleOrthog);
-        startVec = u;        // original code
+        startVec = u;
         start = Nk;
 
-        // Perform a Schur decomposition on Rayleigh
+        std::cout << GridLogDebug << "b after Arnoldi " << b << std::endl;
+
+        // --- Restart: Schur-decompose Rayleigh, reorder by ritzFilter, rotate
+        //     the basis into the Schur vectors, and truncate to the leading Nk.
         ComplexSchurDecomposition schur (Rayleigh, false, ritzFilter);
         std::cout << GridLogDebug << "Schur decomp holds? " << schur.checkDecomposition() << std::endl;
 
@@ -361,8 +422,6 @@ class KrylovSchur {
 
         Eigen::MatrixXcd Q = schur.getMatrixQ();
         Qt = Q.adjoint();                           // TODO should Q be real?
-        Eigen::MatrixXcd S = schur.getMatrixS();
-        // std::cout << GridLogMessage << "Schur decomp holds after reorder? " << schur.checkDecomposition() << std::endl;
 
         std::cout << GridLogMessage << "*** ROTATING TO SCHUR BASIS *** " << std::endl;
 
@@ -370,22 +429,18 @@ class KrylovSchur {
         Rayleigh = schur.getMatrixS();
         b = Q * b;            // b^\dag = b^\dag * Q^\dag <==> b = Q*b
 
-        std::vector<Field> basis2; 
-        constructUR(basis2, basis, Qt, Nm);
-        basis = basis2;
+        std::vector<Field> basis2;
+        constructUR(basis2, basis, Qt, Nm,Nk);
 
         std::cout << GridLogMessage << "*** TRUNCATING FOR RESTART *** " << std::endl;
-
         std::cout << GridLogDebug << "Rayleigh before truncation: " << std::endl << Rayleigh << std::endl;
 
         Eigen::MatrixXcd RayTmp = Rayleigh(Eigen::seqN(0, Nk), Eigen::seqN(0, Nk));
         Rayleigh = RayTmp;
 
-        std::vector<Field> basisTmp = std::vector<Field> (basis.begin(), basis.begin() + Nk);
-        basis = basisTmp;
+        basis = std::vector<Field> (basis2.begin(), basis2.begin() + Nk);
 
-        Eigen::VectorXcd btmp = b.head(Nk);
-        b = btmp;
+        b = b.head(Nk).eval();
 
         std::cout << GridLogDebug << "Rayleigh after truncation: " << std::endl << Rayleigh << std::endl;
 
@@ -395,20 +450,146 @@ class KrylovSchur {
         computeEigensystem(Rayleigh);
         std::cout << GridLogMessage << "Eigenvalues (first Nk sorted): " << std::endl << evals << std::endl;
 
-        // check convergence and return if needed. 
-        int Nconv = converged();
-        std::cout << GridLogMessage << "Number of evecs converged: " << Nconv << std::endl;
-        if (Nconv >= Nstop || i == MaxIter - 1) {
-          std::cout << GridLogMessage << "Converged with " << Nconv << " / " << Nstop << " eigenvectors on iteration " 
-                        << i << "." << std::endl;
-          std::cout << GridLogMessage << "Eigenvalues: " << evals << std::endl;
-
-          // writeEigensystem(path);
-
-          return;
-        }
+        if (checkConvergedAndReport(i)) return;
       }
     }
+
+    /**
+     * Runs the harmonic (shifted) Krylov-Schur loop: extracts Ritz values of a
+     * shift-augmented Rayleigh quotient so that eigenvalues near `*_shift` are
+     * reordered to the top instead of the extremal ones.
+     */
+    void operator()(const Field& v0, int _maxIter, int _Nm, int _Nk, int _Nstop, RealD *_shift, bool doubleOrthog = true) {
+
+      assert(_shift && "harmonic KrylovSchur: shift must be non-null");
+      RealD shiftVal = *_shift;
+
+      MaxIter = _maxIter;
+      Nm = _Nm; Nk = _Nk;
+      Nstop = _Nstop;
+
+      ssq = norm2(v0);
+      RealD approxLambdaMax = approxMaxEval(v0);
+      rtol = Tolerance * approxLambdaMax;
+      std::cout << GridLogMessage << "Approximate max eigenvalue: " << approxLambdaMax << std::endl;
+
+      b = Eigen::VectorXcd::Zero(Nm);       // start as e_{k+1}
+      b(Nm-1) = 1.0;
+
+      int start = 0;
+      Field startVec = v0;
+      littleEvecs = Eigen::MatrixXcd::Zero(Nm, Nm);
+      for (int i = 0; i < MaxIter; i++) {
+        std::cout << GridLogMessage << "Restart Iteration " << i << std::endl;
+
+        // Perform Arnoldi steps to compute Krylov basis and Rayleigh quotient (Hess)
+        arnoldiIteration(startVec, Nm, start, doubleOrthog);
+        startVec = u;
+        start = Nk;
+
+        std::cout << GridLogDebug << "b after Arnoldi " << b << std::endl;
+
+        // --- Harmonic restart: Schur-decompose the shift-augmented Rayleigh
+        //     quotient so Ritz values close to shiftVal are reordered to the
+        //     top, then rotate and truncate as in the non-harmonic case.
+        Eigen::MatrixXcd temp = Rayleigh;
+        for (int m=0;m<Nm;m++) temp(m,m) -= shiftVal;
+        Eigen::MatrixXcd RayleighS = temp.inverse(); // (B-tI)^-1
+        Eigen::MatrixXcd temp2 = RayleighS.adjoint(); //(B-tI)^-1*
+        Eigen::VectorXcd g  = temp2*b; //g = (B-tI)^-1* * b
+        Eigen::MatrixXcd Btilde = Rayleigh + g*(b.adjoint());
+
+        Field utilde(Grid);
+        utilde  = u;
+        for (int j = 0; j<Nm; j++){
+          utilde -= basis[j]*g(j);
+        }
+
+        ComplexSchurDecomposition schurS (Btilde, false, ritzFilter);
+        std::cout << GridLogMessage << "Shifted Schur eigenvalues shift = "<<shiftVal  << std::endl;
+        schurS.schurReorder(Nk);
+
+        Eigen::MatrixXcd Q_s = schurS.getMatrixQ();
+        Eigen::MatrixXcd Qt_s = Q_s.adjoint();                           // TODO should Q be real?
+
+        Btilde=schurS.getMatrixS();
+        Eigen::VectorXcd b_s = Q_s*b; // Q is Qt in SlepC, b_s=bhat
+
+        std::vector<Field> basis2_s;
+        constructUR(basis2_s, basis, Qt_s, Nm,Nk);
+
+        Eigen::MatrixXcd RayTmp_s = Btilde(Eigen::seqN(0, Nk), Eigen::seqN(0, Nk));
+        Btilde = RayTmp_s;
+
+        basis2_s = std::vector<Field> (basis2_s.begin(), basis2_s.begin() + Nk);
+
+        b_s = b_s.head(Nk).eval();
+
+        Eigen::VectorXcd ghat = -Q_s * g;
+        ghat = ghat.head(Nk).eval();
+
+        Field uhat(Grid);
+        uhat  = utilde;
+        for (int j = 0; j<Nk; j++){
+          uhat -= basis2_s[j]*ghat(j);
+        }
+
+        RealD gamma = std::sqrt(norm2(uhat));
+        uhat *= 1.0/gamma;
+        std::cout << GridLogMessage << " gamma "<<gamma << std::endl;
+
+        Btilde  += ghat*(b_s.adjoint());
+        b_s *=gamma;
+
+        Rayleigh = Btilde;
+        basis= basis2_s;
+        b  = b_s;
+        beta_k = gamma;
+        u= uhat;
+
+        checkKSDecomposition();
+        computeEigensystem(Rayleigh);
+        std::cout << GridLogMessage << "Eigenvalues (first Nk sorted): " << std::endl << evals << std::endl;
+
+        if (checkConvergedAndReport(i)) return;
+      }
+    }
+
+  private:
+
+    /**
+     * Shared post-restart convergence check. On convergence (or the final
+     * iteration) reports eigenvalues and optionally the explicit residual
+     * check. Returns true if operator() should return.
+     */
+    bool checkConvergedAndReport(int i) {
+      int Nconv = converged();
+      std::cout << GridLogMessage << "Number of evecs converged: " << Nconv << std::endl;
+      if (Nconv >= Nstop || i == MaxIter - 1) {
+        std::cout << GridLogMessage << "Converged with " << Nconv << " / " << Nstop << " eigenvectors on iteration "
+                      << i << "." << std::endl;
+        std::cout << GridLogMessage << "Eigenvalues: " << std::endl << evals << std::endl;
+
+        if (doEvalCheck) {
+          Field w(Grid);
+          for (int k = 0; k < (int)evecs.size(); k++) {
+            Linop.Op(evecs[k], w);
+            matvecs++;
+            ComplexD eval_est = toStdCmplx(innerProduct(evecs[k], w));
+            w -= eval_est * evecs[k];
+            RealD res = std::sqrt(norm2(w));
+            std::cout << GridLogMessage << "KrylovSchur: evec[" << k << "]"
+                      << "  eval_reported = " << evals[k]
+                      << "  eval_est = " << eval_est
+                      << "  || A v - eval_est * v || = " << res << std::endl;
+          }
+        }
+        return true;
+      }
+      return false;
+    }
+
+  public:
 
     /**
      * Constructs the Arnoldi basis for the Krylov space K_n(D, src). (TODO make private)
@@ -431,13 +612,25 @@ class KrylovSchur {
       ComplexD coeff;
       Field w (Grid);           // A acting on last Krylov vector. 
 
+      // basis.reserve(Nm);
+      // for (int i = start; i < Nm; i++) {
+      //   basis.emplace_back(Grid);
+      // }
+      // basis.assign(Nm, Field(Grid));
+      // basis.resize(Nm);
+      // for (int i = start; i < Nm; i++) {
+      //   basis[i] = Field(Grid);
+      // }
+
       if (start == 0) {       // initialize everything that we need.
         RealD v0Norm = 1 / std::sqrt(ssq);
         basis.push_back(v0Norm * v0);                // normalized source
+        // basis[0] = v0Norm * v0;                // normalized source
 
         Rayleigh = Eigen::MatrixXcd::Zero(Nm, Nm);
         u = Zero();
       } else {
+        // assert( start == basis.size() );      // should be starting at the end of basis (start = Nk)
         std::cout << GridLogMessage << "Resetting Rayleigh and b" << std::endl;
         Eigen::MatrixXcd RayleighCp = Rayleigh;
         Rayleigh = Eigen::MatrixXcd::Zero(Nm, Nm);
@@ -446,24 +639,25 @@ class KrylovSchur {
         // append b^\dag to Rayleigh, add u to basis
         Rayleigh(Nk, Eigen::seqN(0, Nk)) = b.adjoint();
         basis.push_back(u);
+        // basis[start] = u;       // TODO make sure this is correct
         b = Eigen::VectorXcd::Zero(Nm);
       }
 
       // Construct next Arnoldi vector by normalizing w_i = Dv_i - \sum_j v_j h_{ji}
       for (int i = start; i < Nm; i++) {
         Linop.Op(basis.back(), w);
-        matvecs++;
+        // Linop.Op(basis[i], w);
         for (int j = 0; j < basis.size(); j++) {
           coeff = innerProduct(basis[j], w);       // coeff = h_{ij}. Note that since {vi} is ONB it's OK to subtract it off after. 
-          Rayleigh(j, i) = coeff;
+          Rayleigh(j, i) = toStdCmplx(coeff);
           w -= coeff * basis[j];
         }
 
         if (doubleOrthog) {
-          std::cout << GridLogMessage << "Double orthogonalizing." << std::endl;
+          std::cout << GridLogDebug << "Double orthogonalizing." << std::endl;
           for (int j = 0; j < basis.size(); j++) {
             coeff = innerProduct(basis[j], w);      // see if there is any residual component in basis[j] direction
-            Rayleigh(j, i) += std::complex<double>(coeff);  // if coeff is non-zero, adjust Rayleigh
+            Rayleigh(j, i) += toStdCmplx(coeff);   // if coeff is non-zero, adjust Rayleigh
             w -= coeff * basis[j];
           }
         }
@@ -471,10 +665,11 @@ class KrylovSchur {
         // add w_i to the pile
         if (i < Nm - 1) {
           coeff = std::sqrt(norm2(w));
-          Rayleigh(i+1, i) = coeff;
+          Rayleigh(i+1, i) = toStdCmplx(coeff);
           basis.push_back(
             (1.0/coeff) * w
           );
+          // basis[i+1] = (1.0/coeff) * w;
         }
 
         // after iterations, update u and beta_k = ||u|| before norm
@@ -485,6 +680,7 @@ class KrylovSchur {
 
       b(Nm - 1) = beta_k;
 
+      // std::cout << GridLogMessage << "|f|^2 after Arnoldi step = " << norm2(f) << std::endl;
       std::cout << GridLogMessage << "Matvecs: " << matvecs << std::endl;
       std::cout << GridLogMessage << "beta_k = |u| (before norm) after Arnoldi step = " << beta_k << std::endl;
       std::cout << GridLogDebug << "Computed Rayleigh quotient = " << std::endl << Rayleigh << std::endl;
@@ -506,25 +702,33 @@ class KrylovSchur {
     {
       std::cout << GridLogMessage << "Computing eigenvalues." << std::endl;
 
-      // evals = S.diagonal();
-      int n = evals.size();       // should be regular Nm
-
       evecs.clear();
-
-      // TODO: is there a faster way to get the eigenvectors of a triangular matrix?
-      // Rayleigh.triangularView<Eigen::Upper> tri;
 
       Eigen::ComplexEigenSolver<Eigen::MatrixXcd> es;
       es.compute(S);
-      evals = es.eigenvalues();
-      littleEvecs = es.eigenvectors();
+
+      // Sort eigenvalues/evecs to match the schurReorder ordering.
+      int n = es.eigenvalues().size();
+      ComplexComparator cComp(ritzFilter);
+      std::vector<int> idx(n);
+      std::iota(idx.begin(), idx.end(), 0);
+      std::sort(idx.begin(), idx.end(), [&](int a, int b){
+        return cComp(toStdCmplx(es.eigenvalues()(a)), toStdCmplx(es.eigenvalues()(b)));
+      });
+
+      evals.resize(n);
+      littleEvecs.resize(n, n);
+      for (int k = 0; k < n; k++) {
+        evals(k)          = es.eigenvalues()(idx[k]);
+        littleEvecs.col(k) = es.eigenvectors().col(idx[k]);
+      }
 
       // Convert evecs to lattice fields
       for (int k = 0; k < n; k++) {
         Eigen::VectorXcd vec = littleEvecs.col(k);
         Field tmp (basis[0].Grid());
         tmp = Zero();
-        for (int j = 0; j < basis.size(); j++) {
+        for (int j = 0; j < (int)basis.size(); j++) {
           tmp = tmp + vec[j] * basis[j];
         }
         evecs.push_back(tmp);
@@ -587,6 +791,7 @@ class KrylovSchur {
       std::cout << GridLogDebug << "b: " << b << std::endl;
       Field tmp (Grid); Field fullEvec (Grid);
       ritzEstimates.clear();
+      // ritzEstimates.resize(_Nm);
       for (int k = 0; k < _Nm; k++) {
         Eigen::VectorXcd evec_k = littleEvecs.col(k);
         RealD ritzEstimate = std::abs(b.dot(evec_k));           // b^\dagger s
@@ -594,11 +799,12 @@ class KrylovSchur {
         std::cout << GridLogMessage << "Ritz estimate for evec " << k << " = " << ritzEstimate << std::endl;
         if (ritzEstimate < rtol) {
           Nconv++;
+        } else {
+          break;
         }
-
       }
       // Check that Ritz estimate is explicitly || D (Uy) - lambda (Uy) ||
-      // checkRitzEstimate();
+//       checkRitzEstimate();
       return Nconv;
     }
 
@@ -611,8 +817,21 @@ class KrylovSchur {
       std::cout << GridLogMessage << "*** CHECKING KRYLOV-SCHUR DECOMPOSITION *** " << std::endl;
 
       int k = basis.size();         // number of basis vectors, also the size of Rayleigh.
+
+      // rotate basis by Rayleigh to construct UR
+      // std::vector<Field> rotated;
+
+      // std::cout << GridLogDebug << "Rayleigh in KSDecomposition: " << std::endl << Rayleigh << std::endl;
+
       std::vector<Field> rotated = basis;
-      constructUR(rotated, basis, Rayleigh, k);             // manually rotate
+      constructUR(rotated, basis, Rayleigh, k,k);             // manually rotate
+      // Eigen::MatrixXcd Rt = Rayleigh.adjoint();
+      // basisRotate(rotated, Rt, 0, k, 0, k, k);           // UR
+
+      // TODO: make a new function that I'm positive does what this is doing
+      // just take the basis U = (u1 u2 ... uNm) and form the linear combination UR from R
+      
+      // For each i, form D u(i) and subtract off (US - u b^\dag)(i)
       RealD delta = 0.0; RealD deltaSum = 0;
       Field tmp (Grid); tmp = Zero();
       for (int i = 0; i < k; i++) {
@@ -620,6 +839,7 @@ class KrylovSchur {
         delta = norm2(tmp - rotated[i] - u * std::conj(b(i)));
         delta = delta / norm2(tmp);               // relative tolerance
         deltaSum += delta;
+
         // std::cout << GridLogDebug << "Iteration " << i << std::endl;
         // std::cout << GridLogDebug << "Du = " << norm2(tmp) << std::endl;
         // std::cout << GridLogDebug << "rotated = " << norm2(rotated[i]) << std::endl;
@@ -627,6 +847,14 @@ class KrylovSchur {
         std::cout << GridLogMessage << "Deviation in decomp, column " << i << ": " << delta << std::endl;
       }
       std::cout << GridLogMessage << "Squared sum of relative deviations in decomposition: " << deltaSum << std::endl;
+
+      // std::cout << "[DEBUG] testing basis rotate" << std::endl;
+      // std::vector<Field> rotated2;
+      // constructUR(rotated2, basis, Rayleigh, k);
+      // for (int i = 0; i < k; i++) {
+      //   std::cout << "rotated[i] - UR[i] = " << norm2(rotated[i] - rotated2[i]) << std::endl;
+      // }
+
       return deltaSum < tol;
     }
 
@@ -670,40 +898,40 @@ class KrylovSchur {
       // be wrong. So, just need to be more careful and actually read out the eigenvalues. 
 
       Field tmp (Grid);
+      // std::cout << "n evecs: " << evecs.size() << std::endl;
       for (int k = 0; k < evecs.size(); k++) {
         tmp = Zero();
         Linop.Op(evecs[k], tmp);        // D evec
         RealD ritz = std::sqrt(norm2(tmp - evals[k] * evecs[k]));
         std::cout << "Ritz estimate " << k << " = " << ritz << std::endl;
+
+        // Checking little Ritz estimate
+        // Eigen::VectorXcd littleEvec = littleEvecs.col(k);
+        // Eigen::VectorXcd dev = Rayleigh * littleEvec - evals[k] * littleEvec;
+        // std::cout << GridLogMessage << "Little Ritz estimate = " << dev.norm() << std::endl;
       }
       return;
     }
 
     /**
-     * Given a vector of fields U (equivalently, a LxN matrix, where L is the number of degrees of 
-     * freedom on the lattice field) and an NxN matrix R, forms the product UR. 
-     * 
-     * Note that I believe this is equivalent to basisRotate(U, R.adjoint(), 0, N, 0, N, N), but I'm 
-     * not 100% sure (this will be slower and unoptimized though).
+     * Given a vector of fields U (equivalently, a LxN matrix, where L is the number of degrees of
+     * freedom on the lattice field) and an NxN matrix R, forms the product UR.
+     * Only the first N2 output columns are computed; columns [N2, N) are Zero.
+     *
+     * Implemented with the accelerator basisRotate kernel, which computes
+     * basis[j] <- sum_k Qt(j,k) basis[k] in place, so we copy U into UR and
+     * pass R^T. The coefficients are staged as ComplexD (thrust::complex on
+     * GPU builds) since std::complex has no device arithmetic with Grid tensors.
      */
-    void constructUR(std::vector<Field>& UR, std::vector<Field> &U, Eigen::MatrixXcd& R, int N) {
-      Field tmp (Grid);
+    void constructUR(std::vector<Field>& UR, std::vector<Field> &U, Eigen::MatrixXcd& R, int N, int N2) {
+      KSCoeffMat Rt(N);
+      for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++)
+          Rt(i, j) = ComplexD(R(j, i).real(), R(j, i).imag());
 
-      UR.clear();
-      // UR.resize(N);
-
-      std::cout << GridLogDebug << "R to rotate by (should be Rayleigh): " << R << std::endl;
-
-      for (int i = 0; i < N; i++) {
-        tmp = Zero();
-        for (int j = 0; j < N; j++) {
-          std::cout << GridLogDebug << "Adding R("<<j<<", "<<i<<") = " << R(j, i) << " to rotated" << std::endl;
-          std::cout << GridLogDebug << "Norm of U[j] is " << norm2(U[j]) << " to rotated" << std::endl;
-          tmp = tmp + U[j] * R(j, i);
-        }
-        std::cout << GridLogDebug << "rotated norm at i = " << i << " is: " << norm2(tmp) << std::endl;
-        UR.push_back(tmp);
-      }
+      UR = U;
+      basisRotate(UR, Rt, 0, N2, 0, N, N);
+      for (int i = N2; i < N; i++) UR[i] = Zero();
       return;
     }
 
@@ -713,12 +941,14 @@ class KrylovSchur {
     void constructRU(std::vector<Field>& RU, std::vector<Field> &U, Eigen::MatrixXcd& R, int N) {
       Field tmp (Grid);
       RU.clear();
+      // RU.resize(N);
       for (int i = 0; i < N; i++) {
         tmp = Zero();
         for (int j = 0; j < N; j++) {
           tmp = tmp + R(i, j) * U[j];
         }
         RU.push_back(tmp);
+        // RU[i] = tmp;
       }
       return;
     }

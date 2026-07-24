@@ -1,35 +1,12 @@
 /*************************************************************************************
 
-    Runs the Krylov-Schur algorithm on a (pre-conditioned) domain-wall fermion operator 
-    to determine part of its spectrum. 
-
-    Usage : 
-      $ ./Example_spec_kryschur <Nm> <Nk> <maxiter> <Nstop> <inFile> <outDir> <?rf>
-
-      Nm = Maximum size of approximation subspace.
-      Nk = Size of truncation subspace
-      maxiter = Maximum number of iterations.
-      Nstop   = Stop when Nstop eigenvalues have converged. 
-      inFile  = Gauge configuration to read in.
-      outDir  = Directory to write output to.
-      rf      = (Optional) RitzFilter to sort with. Takes in any string in 
-                  {EvalNormSmall, EvalNormLarge, EvalReSmall, EvalReLarge, EvalImSmall, EvalImLarge}
-    
-    Output:
-      ${outDir}/evals.txt  = Contains all eigenvalues. Each line is formatted as `$idx $eval $ritz`, where:
-                              - $idx is the index of the eigenvalue.
-                              - $eval is the eigenvalue, formated as "(re,im)".
-                              - $ritz is the Ritz estimate of the eigenvalue (deviation from being a true eigenvalue)
-      ${outDir}/evec${idx} = Eigenvector $idx written out in SCIDAC format (if LIME is enabled).
-
     Grid physics library, www.github.com/paboyle/Grid 
 
     Source file: ./tests/Test_padded_cell.cc
 
     Copyright (C) 2023
 
-    Author: Peter Boyle <paboyle@ph.ed.ac.uk>
-    Author: Patrick Oare <poare@bnl.edu>
+Author: Peter Boyle <paboyle@ph.ed.ac.uk>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -49,6 +26,8 @@
     *************************************************************************************/
     /*  END LEGAL */
 
+// copied here from Test_general_coarse_pvdagm.cc
+
 #include <cstdlib>
 
 #include <Grid/Grid.h>
@@ -59,57 +38,8 @@
 #include <Grid/algorithms/iterative/PrecGeneralisedConjugateResidualNonHermitian.h>
 #include <Grid/algorithms/iterative/BiCGSTAB.h>
 
-#include <Grid/parallelIO/IldgIOtypes.h>
-#include <Grid/parallelIO/IldgIO.h>
-
 using namespace std;
 using namespace Grid;
-
-template <class T> void writeFile(T& in, std::string const fname){  
-  #ifdef HAVE_LIME
-    // Ref: https://github.com/paboyle/Grid/blob/feature/scidac-wp1/tests/debug/Test_general_coarse_hdcg_phys48.cc#L111
-    std::cout << Grid::GridLogMessage << "Writes to: " << fname << std::endl;
-    Grid::emptyUserRecord record;
-    Grid::ScidacWriter WR(in.Grid()->IsBoss());
-    WR.open(fname);
-    WR.writeScidacFieldRecord(in,record,0); // Lexico
-    WR.close();
-  #endif
-}
-
-/**
- * Writes the eigensystem of a Krylov Schur object to a directory. 
- * 
- * Parameters
- * ----------
- * std::string path
- *    Directory to write to. 
- */
-template <class Field>
-void writeEigensystem(KrylovSchur<Field> KS, std::string outDir) {
-  int Nk = KS.getNk();
-  std::cout << GridLogMessage << "Writing output to directory: " << outDir << std::endl;
-  
-  // Write evals
-  std::string evalPath = outDir + "/evals.txt";
-  std::ofstream fEval;
-  fEval.open(evalPath);
-  Eigen::VectorXcd evals = KS.getEvals();
-  std::vector<RealD> ritz  = KS.getRitzEstimates();
-  for (int i = 0; i < Nk; i++) {
-    // write eigenvalues and Ritz estimates
-    fEval << i << " " << evals(i) << " " << ritz[i];
-    if (i < Nk - 1) { fEval << "\n"; }
-  }
-  fEval.close();
-  
-  // Write evecs (TODO: very heavy on storage costs! Don't write them all out)
-  // std::vector<Field> evecs = KS.getEvecs();
-  // for (int i = 0; i < Nk; i++) {
-  //   std::string fName = outDir + "/evec" + std::to_string(i);
-  //   writeFile(evecs[i], fName);     // using method from Grid/HMC/ComputeWilsonFlow.cc
-  // }
-}
 
 // Hermitize a DWF operator by squaring it
 template<class Matrix,class Field>
@@ -256,35 +186,115 @@ ShiftedComplexPVdagMLinearOperator(ComplexD _shift,Matrix &Mat,Matrix &PV): shif
   }
 };
 
+template<class Fobj,class CComplex,int nbasis>
+class MGPreconditioner : public LinearFunction< Lattice<Fobj> > {
+public:
+  using LinearFunction<Lattice<Fobj> >::operator();
+
+  typedef Aggregation<Fobj,CComplex,nbasis> Aggregates;
+  typedef typename Aggregation<Fobj,CComplex,nbasis>::FineField    FineField;
+  typedef typename Aggregation<Fobj,CComplex,nbasis>::CoarseVector CoarseVector;
+  typedef typename Aggregation<Fobj,CComplex,nbasis>::CoarseMatrix CoarseMatrix;
+  typedef LinearOperatorBase<FineField>                            FineOperator;
+  typedef LinearFunction    <FineField>                            FineSmoother;
+  typedef LinearOperatorBase<CoarseVector>                         CoarseOperator;
+  typedef LinearFunction    <CoarseVector>                         CoarseSolver;
+  Aggregates     & _Aggregates;
+  FineOperator   & _FineOperator;
+  FineSmoother   & _PreSmoother;
+  FineSmoother   & _PostSmoother;
+  CoarseOperator & _CoarseOperator;
+  CoarseSolver   & _CoarseSolve;
+
+  int    level;  void Level(int lv) {level = lv; };
+
+  MGPreconditioner(Aggregates &Agg,
+		   FineOperator &Fine,
+		   FineSmoother &PreSmoother,
+		   FineSmoother &PostSmoother,
+		   CoarseOperator &CoarseOperator_,
+		   CoarseSolver &CoarseSolve_)
+    : _Aggregates(Agg),
+      _FineOperator(Fine),
+      _PreSmoother(PreSmoother),
+      _PostSmoother(PostSmoother),
+      _CoarseOperator(CoarseOperator_),
+      _CoarseSolve(CoarseSolve_),
+      level(1)  {  }
+
+  virtual void operator()(const FineField &in, FineField & out) 
+  {
+    GridBase *CoarseGrid = _Aggregates.CoarseGrid;
+    //    auto CoarseGrid = _CoarseOperator.Grid();
+    CoarseVector Csrc(CoarseGrid);
+    CoarseVector Csol(CoarseGrid);
+    FineField vec1(in.Grid());
+    FineField vec2(in.Grid());
+
+    std::cout<<GridLogMessage << "Calling PreSmoother " <<std::endl;
+
+    //    std::cout<<GridLogMessage << "Calling PreSmoother input residual "<<norm2(in) <<std::endl;
+    double t;
+    // Fine Smoother
+    //    out = in;
+    out = Zero();
+    t=-usecond();
+    _PreSmoother(in,out);
+    t+=usecond();
+
+    std::cout<<GridLogMessage << "PreSmoother took "<< t/1000.0<< "ms" <<std::endl;
+
+    // Update the residual
+    _FineOperator.Op(out,vec1);  sub(vec1, in ,vec1);   
+    //    std::cout<<GridLogMessage <<"Residual-1 now " <<norm2(vec1)<<std::endl;
+
+    // Fine to Coarse 
+    t=-usecond();
+    _Aggregates.ProjectToSubspace  (Csrc,vec1);
+    t+=usecond();
+    std::cout<<GridLogMessage << "Project to coarse took "<< t/1000.0<< "ms" <<std::endl;
+
+    // Coarse correction
+    t=-usecond();
+    Csol = Zero();
+    _CoarseSolve(Csrc,Csol);
+    //Csol=Zero();
+    t+=usecond();
+    std::cout<<GridLogMessage << "Coarse solve took "<< t/1000.0<< "ms" <<std::endl;
+
+    // Coarse to Fine
+    t=-usecond();  
+    //    _CoarseOperator.PromoteFromSubspace(_Aggregates,Csol,vec1);
+    _Aggregates.PromoteFromSubspace(Csol,vec1); 
+    add(out,out,vec1);
+    t+=usecond();
+    std::cout<<GridLogMessage << "Promote to this level took "<< t/1000.0<< "ms" <<std::endl;
+
+    // Residual
+    _FineOperator.Op(out,vec1);  sub(vec1 ,in , vec1);  
+    //    std::cout<<GridLogMessage <<"Residual-2 now " <<norm2(vec1)<<std::endl;
+
+    // Fine Smoother
+    t=-usecond();
+    //    vec2=vec1;
+    vec2=Zero();
+    _PostSmoother(vec1,vec2);
+    t+=usecond();
+    std::cout<<GridLogMessage << "PostSmoother took "<< t/1000.0<< "ms" <<std::endl;
+
+    add( out,out,vec2);
+    std::cout<<GridLogMessage << "Done " <<std::endl;
+  }
+};
+
 int main (int argc, char ** argv)
 {
   Grid_init(&argc,&argv);
 
-  // TODO implement this
-
-  // Usage : $ ./Example_spec_kryschur <Nm> <Nk> <maaxiter> <Nstop> <inFile> <outDir>
-  std::string NmStr      = argv[1];
-  std::string NkStr      = argv[2];
-  std::string maxIterStr = argv[3];
-  std::string NstopStr   = argv[4];
-  std::string file       = argv[5];
-  std::string outDir     = argv[6];
-
-  RitzFilter RF;
-  if (argc == 8) {
-    std::string rf       = argv[7];
-    RF = selectRitzFilter(rf);
-  } else {
-    RF = EvalReSmall;
-  }
-  std::cout << "Sorting eigenvalues using " << rfToString(RF) << std::endl;
-
   const int Ls=16;
-  // const int Ls = 8;
 
 //   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(), GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   std::vector<int> lat_size {16, 16, 16, 32};
-  // std::vector<int> lat_size {8, 8, 8, 8};
   std::cout << "Lattice size: " << lat_size << std::endl;
   GridCartesian * UGrid = SpaceTimeGrid::makeFourDimGrid(lat_size, 
 								          GridDefaultSimd(Nd,vComplex::Nsimd()),
@@ -294,23 +304,52 @@ int main (int argc, char ** argv)
   GridCartesian         * FGrid   = SpaceTimeGrid::makeFiveDimGrid(Ls,UGrid);
   GridRedBlackCartesian * FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls,UGrid);
 
+  // Construct a coarsened grid
+  // poare TODO: replace this with the following line?
+  Coordinate clatt = lat_size;
+//   Coordinate clatt = GridDefaultLatt();              // [PO] initial line before I edited it
+  for(int d=0;d<clatt.size();d++){
+    clatt[d] = clatt[d]/2;
+    //    clatt[d] = clatt[d]/4;
+  }
+  GridCartesian *Coarse4d =  SpaceTimeGrid::makeFourDimGrid(clatt, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());;
+  GridCartesian *Coarse5d =  SpaceTimeGrid::makeFiveDimGrid(1,Coarse4d);
+
   std::vector<int> seeds4({1,2,3,4});
   std::vector<int> seeds5({5,6,7,8});
+  std::vector<int> cseeds({5,6,7,8});
   GridParallelRNG          RNG5(FGrid);   RNG5.SeedFixedIntegers(seeds5);
   GridParallelRNG          RNG4(UGrid);   RNG4.SeedFixedIntegers(seeds4);
+  GridParallelRNG          CRNG(Coarse5d);CRNG.SeedFixedIntegers(cseeds);
 
   LatticeFermion    src(FGrid); random(RNG5,src);
+  LatticeFermion result(FGrid); result=Zero();
+  LatticeFermion    ref(FGrid); ref=Zero();
+  LatticeFermion    tmp(FGrid);
+  LatticeFermion    err(FGrid);
   LatticeGaugeField Umu(UGrid);
 
   FieldMetaData header;
+//   std::string file("ckpoint_lat.4000");
+  // std::string file("/Users/patrickoare/libraries/PETSc-Grid/ckpoint_lat.4000");
+  std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
   NerscIO::readConfiguration(Umu,header,file);
 
   RealD mass=0.01;
-  // RealD mass=0.001;
   RealD M5=1.8;
 
   DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
   DomainWallFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5);
+
+  // const int nbasis = 20;            // size of approximate basis for low-mode space
+  const int nbasis = 3;            // size of approximate basis for low-mode space
+  const int cb = 0 ;
+  LatticeFermion prom(FGrid);
+
+  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  typedef LittleDiracOperator::CoarseVector CoarseVector;
+
+  NextToNearestStencilGeometry5D geom(Coarse5d);
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
@@ -324,25 +363,48 @@ int main (int argc, char ** argv)
   SquaredLinearOperator<DomainWallFermionD, LatticeFermionD> Dsq (Ddwf);
   NonHermitianLinearOperator<DomainWallFermionD, LatticeFermionD> DLinOp (Ddwf);
 
-  int Nm = std::stoi(NmStr);
-  int Nk = std::stoi(NkStr);
-  int maxIter = std::stoi(maxIterStr);
-  int Nstop = std::stoi(NstopStr);
+  //////////////////////////////////////////////////////////////////////////////////////////////
+  // Arnoldi vs Krylov-Schur cross-check on the (non-Hermitian) 4d Wilson operator.
+  // Both solvers seek the largest-modulus eigenvalues of Dw at m = 0.01 on the same gauge
+  // configuration, starting from the same source with identical parameters (Nm = 24, Nk = 12,
+  // stop at 8 converged), so their leading Ritz values should agree to solver tolerance.
+  //////////////////////////////////////////////////////////////////////////////////////////////
+  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
+  std::cout<<GridLogMessage<<"* Wilson operator: Arnoldi vs KrylovSchur *"<<std::endl;
+  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
 
-  std::cout << GridLogMessage << "Runnning Krylov Schur. Nm = " << Nm << ", Nk = " << Nk << ", maxIter = " << maxIter 
-                  << ", Nstop = " << Nstop << std::endl;
-  
-  KrylovSchur KrySchur (PVdagM, FGrid, 1e-8, RF);      // use preconditioned PV^\dag D_{dwf}
-  // KrylovSchur KrySchur (DLinOp, FGrid, 1e-8, RF);         // use D_{dwf}
-  KrySchur(src, maxIter, Nm, Nk, Nstop);
+  RealD wilsonMass = 0.01;
+  WilsonFermionD Dw(Umu, *UGrid, *UrbGrid, wilsonMass);
+  NonHermitianLinearOperator<WilsonFermionD, LatticeFermionD> DwLinOp(Dw);
+
+  // The Wilson operator lives on the 4d gauge grid (the DWF fields above are 5d), so we need
+  // a fresh 4d source. Both solvers are handed the same vector.
+  LatticeFermionD src4(UGrid);
+  random(RNG4, src4);
+
+  std::vector<RealD> shifts = {1.0, 1.2, 1.5, 2.0};
+
+  int NmW = 64;         // total Krylov basis size
+  int NkW = 32;         // basis vectors kept at each restart
+  int NstopW = 28;       // stop once NstopW eigenvalues have converged
+  int maxIterW = 10000;  // generous restart budget; both solvers return early on convergence
+
+  std::vector<Eigen::VectorXcd> allEvals;
+  for (int i = 0; i < shifts.size(); i++) {
+    RealD shift = shifts[i];
+    std::cout << GridLogMessage << "Running KrylovSchur on Dw with shift " << shift << std::endl;
+    KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
+    KS(src4, maxIterW, NmW, NkW, NstopW, shift);
+    std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shift << "): " << std::endl << KS.getEvals() << std::endl;
+    allEvals.push_back(KS.getEvals());
+  }
 
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
-  std::cout<<GridLogMessage << "***************** RESULTS *****************" << std::endl;
+  std::cout<<GridLogMessage << "***** WILSON RESULTS (m = 0.01) ***********" << std::endl;
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
-
-  std::cout << GridLogMessage << "Krylov Schur eigenvalues: " << std::endl << KrySchur.getEvals() << std::endl;
-
-  writeEigensystem(KrySchur, outDir);
+  for (int i = 0; i < shifts.size(); i++) {
+    std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shifts[i] << "): " << std::endl << allEvals[i] << std::endl;
+  }
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
