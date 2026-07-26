@@ -104,11 +104,12 @@ void writeEigensystem(KrylovSchur<Field> KS, std::string outDir) {
   fEval.close();
   
   // Write evecs (TODO: very heavy on storage costs! Don't write them all out)
-  // std::vector<Field> evecs = KS.getEvecs();
-  // for (int i = 0; i < Nk; i++) {
-  //   std::string fName = outDir + "/evec" + std::to_string(i);
-  //   writeFile(evecs[i], fName);     // using method from Grid/HMC/ComputeWilsonFlow.cc
-  // }
+  int Nevecs_write = Nk;    // only do this for one run
+  std::vector<Field> evecs = KS.getEvecs();
+  for (int i = 0; i < Nevecs_write; i++) {
+    std::string fName = outDir + "/evec" + std::to_string(i);
+    writeFile(evecs[i], fName);     // using method from Grid/HMC/ComputeWilsonFlow.cc
+  }
 }
 
 // Hermitize a DWF operator by squaring it
@@ -275,15 +276,17 @@ int main (int argc, char ** argv)
   } else {
     RF = EvalReSmall;
   }
-  std::cout << "Sorting eigenvalues using " << rfToString(RF) << std::endl;
+  std::cout << GridLogMessage << "Sorting eigenvalues using " << rfToString(RF) << std::endl;
+  std::cout << GridLogMessage << "Reading gauge field from: " << file << std::endl;
 
   const int Ls=16;
   // const int Ls = 8;
 
 //   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(), GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   std::vector<int> lat_size {16, 16, 16, 32};
+  // std::vector<int> lat_size {32, 32, 32, 32};
   // std::vector<int> lat_size {8, 8, 8, 8};
-  std::cout << "Lattice size: " << lat_size << std::endl;
+  std::cout << GridLogMessage << "Lattice size: " << lat_size << std::endl;
   GridCartesian * UGrid = SpaceTimeGrid::makeFourDimGrid(lat_size, 
 								          GridDefaultSimd(Nd,vComplex::Nsimd()),
 								          GridDefaultMpi());
@@ -291,6 +294,7 @@ int main (int argc, char ** argv)
 
   GridCartesian         * FGrid   = SpaceTimeGrid::makeFiveDimGrid(Ls,UGrid);
   GridRedBlackCartesian * FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls,UGrid);
+  std::cout << GridLogMessage << "Grids constructed" << std::endl;
 
   std::vector<int> seeds4({1,2,3,4});
   std::vector<int> seeds5({5,6,7,8});
@@ -300,27 +304,36 @@ int main (int argc, char ** argv)
   LatticeFermion    src(FGrid); random(RNG5,src);
   LatticeGaugeField Umu(UGrid);
 
+  std::cout << GridLogMessage << "Reading configuration" << std::endl;
   FieldMetaData header;
   NerscIO::readConfiguration(Umu,header,file);
 
-  RealD mass=0.01;
-  // RealD mass=0.001;
+  // RealD mass=0.01;
+  RealD mass=0.001;
   RealD M5=1.8;
 
-  DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
-  DomainWallFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5);
+  // DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
+  // DomainWallFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5);
+  RealD b=1.5;// Scale factor b+c=2, b-c=1
+  RealD c=0.5;
+  MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
+  MobiusFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5,b,c);
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   std::cout<<GridLogMessage<<std::endl;
 
-  typedef PVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> PVdagM_t;
-  typedef ShiftedPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedPVdagM_t;
-  typedef ShiftedComplexPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedComplexPVdagM_t;
+  // typedef PVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> PVdagM_t;
+  // typedef ShiftedPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedPVdagM_t;
+  // typedef ShiftedComplexPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedComplexPVdagM_t;
+  typedef PVdagMLinearOperator<MobiusFermionD,LatticeFermionD> PVdagM_t;
+  typedef ShiftedPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedPVdagM_t;
+  typedef ShiftedComplexPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedComplexPVdagM_t;
+
   PVdagM_t PVdagM(Ddwf, Dpv);
   ShiftedPVdagM_t ShiftedPVdagM(0.1,Ddwf,Dpv);
-  SquaredLinearOperator<DomainWallFermionD, LatticeFermionD> Dsq (Ddwf);
-  NonHermitianLinearOperator<DomainWallFermionD, LatticeFermionD> DLinOp (Ddwf);
+  // NonHermitianLinearOperator<DomainWallFermionD, LatticeFermionD> DLinOp (Ddwf);
+  NonHermitianLinearOperator<MobiusFermionD, LatticeFermionD> DLinOp (Ddwf);
 
   int Nm = std::stoi(NmStr);
   int Nk = std::stoi(NkStr);
@@ -339,6 +352,11 @@ int main (int argc, char ** argv)
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
 
   std::cout << GridLogMessage << "Krylov Schur eigenvalues: " << std::endl << KrySchur.getEvals() << std::endl;
+
+  std::cout << GridLogMessage << "Hessenberg: " << std::endl << KrySchur.getRayleighQuotient() << std::endl;
+  std::cout << GridLogMessage << "b: " << std::endl << KrySchur.getB() << std::endl;
+  std::cout << GridLogMessage << "beta_k: " << std::endl << KrySchur.getBeta() << std::endl;
+  // TODO actually probably need extended Rayleigh quotient, i.e. (S \\ b^\dagger) where S is the matrix printed on the line above
 
   writeEigensystem(KrySchur, outDir);
 

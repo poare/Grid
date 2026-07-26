@@ -387,18 +387,13 @@ int main (int argc, char ** argv)
   int NstopW = 28;       // stop once NstopW eigenvalues have converged
   int maxIterW = 10000;  // generous restart budget; both solvers return early on convergence
 
-  std::cout << GridLogMessage << "Running Arnoldi on Dw" << std::endl;
-  // EvalNormLarge for the cross-check: largest-modulus eigenvalues are strongly exterior for
-  // the Wilson operator, so both solvers converge quickly. (EvalReSmall stagnates at this
-  // subspace size -- the lowest-Re eigenvalues sit at the edge of the dense spectral bulk.)
-  // Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
-  Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
-  ArnW(src4, maxIterW, NmW, NkW, NstopW, true);   // doubleOrthog on, matching the KrylovSchur default
-
   std::cout << GridLogMessage << "Running KrylovSchur on Dw" << std::endl;
-  // KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
   KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
   KS(src4, maxIterW, NmW, NkW, NstopW);
+
+  std::cout << GridLogMessage << "Running Arnoldi on Dw" << std::endl;
+  Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
+  ArnW(src4, maxIterW, NmW, NkW, NstopW, true);   // doubleOrthog on, matching the KrylovSchur default
 
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
   std::cout<<GridLogMessage << "***** WILSON RESULTS (m = 0.01) ***********" << std::endl;

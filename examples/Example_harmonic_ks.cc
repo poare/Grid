@@ -370,7 +370,7 @@ int main (int argc, char ** argv)
   // stop at 8 converged), so their leading Ritz values should agree to solver tolerance.
   //////////////////////////////////////////////////////////////////////////////////////////////
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"* Wilson operator: Arnoldi vs KrylovSchur *"<<std::endl;
+  std::cout<<GridLogMessage<<"* Wilson operator: HarmonicKrylovSchur *"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
 
   RealD wilsonMass = 0.01;
@@ -382,29 +382,31 @@ int main (int argc, char ** argv)
   LatticeFermionD src4(UGrid);
   random(RNG4, src4);
 
-  std::vector<RealD> shifts = {1.0, 1.2, 1.5, 2.0};
+  // std::vector<RealD> shifts = {1.0, 1.2, 1.5, 2.0};
+  // RealD shift = 1.2;
+  RealD shift = 1.0;
 
   int NmW = 64;         // total Krylov basis size
-  int NkW = 32;         // basis vectors kept at each restart
-  int NstopW = 28;       // stop once NstopW eigenvalues have converged
-  int maxIterW = 10000;  // generous restart budget; both solvers return early on convergence
+  int NkW = 16;         // basis vectors kept at each restart
+  int NstopW = 12;       // stop once NstopW eigenvalues have converged
+  int maxIterW = 50000;
 
-  std::vector<Eigen::VectorXcd> allEvals;
-  for (int i = 0; i < shifts.size(); i++) {
-    RealD shift = shifts[i];
+  // std::vector<Eigen::VectorXcd> allEvals;
+  // for (int i = 0; i < shifts.size(); i++) {
+  //   RealD* shift = &shifts[i];
     std::cout << GridLogMessage << "Running KrylovSchur on Dw with shift " << shift << std::endl;
     KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
-    KS(src4, maxIterW, NmW, NkW, NstopW, shift);
+    KS(src4, maxIterW, NmW, NkW, NstopW, &shift, true);
     std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shift << "): " << std::endl << KS.getEvals() << std::endl;
-    allEvals.push_back(KS.getEvals());
-  }
+  //  allEvals.push_back(KS.getEvals());
+  // }
 
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
   std::cout<<GridLogMessage << "***** WILSON RESULTS (m = 0.01) ***********" << std::endl;
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
-  for (int i = 0; i < shifts.size(); i++) {
-    std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shifts[i] << "): " << std::endl << allEvals[i] << std::endl;
-  }
+  // for (int i = 0; i < shifts.size(); i++) {
+  // std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shifts[i] << "): " << std::endl << allEvals[i] << std::endl;
+  // }
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;

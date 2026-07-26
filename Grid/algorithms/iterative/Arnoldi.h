@@ -480,8 +480,9 @@ class Arnoldi {
       // fastest -- count towards the Nconv >= Nstop stopping test, so the iteration could
       // terminate before any wanted pair had actually converged.
       // for (int k = 0; k < evecs.size(); k++) {
-      int Nwanted = std::min((int)evecs.size(), Nstop);
-      for (int k = 0; k < Nwanted; k++) {
+      // int Nwanted = std::min((int)evecs.size(), Nstop);
+      // for (int k = 0; k < Nwanted; k++) {
+      for (int k = 0; k < Nk; k++) {
         RealD emTs = abs(littleEvecs(Nm - 1, k));           // e_m^T s
         RealD ritzEstimate = beta_k * emTs;                      // ||A x - theta x|| = ||f_m|| |e_m^T s|
         std::cout << GridLogMessage << "Ritz estimate for evec " << k << " = " << ritzEstimate << std::endl;

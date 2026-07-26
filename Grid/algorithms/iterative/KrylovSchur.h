@@ -574,7 +574,6 @@ class KrylovSchur {
           Field w(Grid);
           for (int k = 0; k < (int)evecs.size(); k++) {
             Linop.Op(evecs[k], w);
-            matvecs++;
             ComplexD eval_est = toStdCmplx(innerProduct(evecs[k], w));
             w -= eval_est * evecs[k];
             RealD res = std::sqrt(norm2(w));
@@ -646,6 +645,7 @@ class KrylovSchur {
       // Construct next Arnoldi vector by normalizing w_i = Dv_i - \sum_j v_j h_{ji}
       for (int i = start; i < Nm; i++) {
         Linop.Op(basis.back(), w);
+        matvecs++;
         // Linop.Op(basis[i], w);
         for (int j = 0; j < basis.size(); j++) {
           coeff = innerProduct(basis[j], w);       // coeff = h_{ij}. Note that since {vi} is ONB it's OK to subtract it off after. 
@@ -709,6 +709,7 @@ class KrylovSchur {
 
       // Sort eigenvalues/evecs to match the schurReorder ordering.
       int n = es.eigenvalues().size();
+      std::cout << GridLogMessage << "n: " << n << std::endl;
       ComplexComparator cComp(ritzFilter);
       std::vector<int> idx(n);
       std::iota(idx.begin(), idx.end(), 0);
@@ -791,17 +792,20 @@ class KrylovSchur {
       std::cout << GridLogDebug << "b: " << b << std::endl;
       Field tmp (Grid); Field fullEvec (Grid);
       ritzEstimates.clear();
+      std::cout << GridLogMessage << "_Nm, Nk = " << _Nm << ", " << Nk << std::endl;
       // ritzEstimates.resize(_Nm);
-      for (int k = 0; k < _Nm; k++) {
+      // for (int k = 0; k < _Nm; k++) {      // TODO make sure this works
+      for (int k = 0; k < Nk; k++) {
         Eigen::VectorXcd evec_k = littleEvecs.col(k);
         RealD ritzEstimate = std::abs(b.dot(evec_k));           // b^\dagger s
         ritzEstimates.push_back(ritzEstimate);
         std::cout << GridLogMessage << "Ritz estimate for evec " << k << " = " << ritzEstimate << std::endl;
         if (ritzEstimate < rtol) {
           Nconv++;
-        } else {
-          break;
         }
+        //  else {
+        //   break;
+        // }
       }
       // Check that Ritz estimate is explicitly || D (Uy) - lambda (Uy) ||
 //       checkRitzEstimate();
