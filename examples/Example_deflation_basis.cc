@@ -293,6 +293,7 @@ void poly_coeffs(std::vector<std::complex<double>> &coeffs, LinearOperatorBase<L
 
 }
 
+/*
 template<class Field>
 void TestSubspace(LinearOperatorBase<Field> &DiracOp, Field &psi, Field &noise, std::vector<std::complex<double>> &coeffs, GridBase* FineGrid, int maxit, std::string path, bool standard = true) 
 {
@@ -347,6 +348,7 @@ void TestSubspace(LinearOperatorBase<Field> &DiracOp, Field &psi, Field &noise, 
       write(XW, "PolynomialFile", PF);
     }
 }
+*/
 
 int main (int argc, char ** argv)
 {

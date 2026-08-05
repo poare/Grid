@@ -53,8 +53,10 @@ template<class Matrix,class Field>
 class PVdagMLinearOperator : public LinearOperatorBase<Field> {
   Matrix &_Mat;
   Matrix &_PV;
+  int nApp;
+  int nAppDag;
 public:
-  PVdagMLinearOperator(Matrix &Mat,Matrix &PV): _Mat(Mat),_PV(PV){};
+  PVdagMLinearOperator(Matrix &Mat,Matrix &PV): _Mat(Mat),_PV(PV), nApp(0), nAppDag(0) {};
 
   void OpDiag (const Field &in, Field &out) {    assert(0);  }
   void OpDir  (const Field &in, Field &out,int dir,int disp) {    assert(0);  }
@@ -64,13 +66,27 @@ public:
     Field tmp(in.Grid());
     _Mat.M(in,tmp);
     _PV.Mdag(tmp,out);
+    nApp++;
   }
   void AdjOp     (const Field &in, Field &out){
     //    std::cout << GridLogMessage<<"AdjOp: Mdag PV "<<std::endl;
     Field tmp(in.Grid());
     _PV.M(in,tmp);
     _Mat.Mdag(tmp,out);
+    nAppDag++;
   }
+
+  void clear() {
+    nApp = 0;
+    nAppDag = 0;
+  }
+
+  void getApplications() {
+    std::cout << GridLogMessage << "# applications of PVdagM: " << nApp << std::endl;
+    std::cout << GridLogMessage << "# applications of PVdagM^dag: " << nAppDag << std::endl;
+    std::cout << GridLogMessage << "# applications total: " << nApp + nAppDag << std::endl;
+  }
+
   void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
     HermOp(in,out);
     ComplexD dot = innerProduct(in,out);
@@ -254,12 +270,199 @@ public:
   }
 };
 
+template<class PVdagM_t, class ShiftedPVdagM_t, class Subspace, class LittleDiracOperator, class CoarseVector, class TwoLevelMG>
+void runMG(
+  GridCartesian *FGrid,
+  GridCartesian *Coarse5d, 
+  NextToNearestStencilGeometry5D geom,
+  PVdagM_t PVdagM,
+  ShiftedPVdagM_t ShiftedPVdagM,
+  // std::vector<LatticeFermion> subspace
+  Subspace AggregatesPD
+) {
+
+  // typedef Aggregation<vSpinColourVector,vTComplex,nbasis> Subspace;
+  // typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  // typedef LittleDiracOperator::CoarseVector CoarseVector;
+
+  std::vector<LatticeFermion> subspace = AggregatesPD.subspace;
+  int nbasis = subspace.size();
+  const int cb = 0 ;
+
+  LatticeFermion err(FGrid);
+  LatticeFermion prom(FGrid);
+  LatticeFermion tmp(FGrid);
+
+  CoarseVector c_src (Coarse5d);
+  CoarseVector c_res (Coarse5d);
+  CoarseVector c_proj(Coarse5d);
+  Complex one(1.0);
+
+  LatticeFermionD f_src(FGrid);
+  LatticeFermionD f_res(FGrid);
+  // typedef MGPreconditioner<vSpinColourVector,  vTComplex,nbasis> TwoLevelMG;
+  TrivialPrecon<CoarseVector> simple;
+  TrivialPrecon<LatticeFermionD> simple_fine;
+
+  // Subspace AggregatesPD(Coarse5d,FGrid,cb);
+
+  // Orthonormalize subspace and compute nulliness
+  /*
+  std::cout << GridLogMessage << "Orthonormalizing basis and computing nulliness" << std::endl;
+  std::vector<LatticeFermion> ONB;
+  LatticeFermion w (FGrid); w = Zero();
+  LatticeFermion Dw (FGrid); Dw = Zero();
+  for (int i = 0; i < nbasis; i++) {
+    w = subspace[i];
+    for (int j = 0; j < ONB.size(); j++) {
+      // coeff = innerProduct(ONB[j], w);
+      w -= innerProduct(ONB[j], w) * ONB[j];
+    }
+    w = (1.0 / std::sqrt(norm2(w))) * w;    // normalize
+
+    Dw = Zero();
+    PVdagM.Op(subspace[i], Dw);
+    std::cout << "Before ortho=" << innerProduct(subspace[i], Dw) << std::endl;
+
+    Dw = Zero();
+    PVdagM.Op(w, Dw);
+    std::cout << "<i|D|i>=" << innerProduct(w, Dw) << "; <i|DdagD|i>=" << norm2(Dw) << std::endl;
+
+    ONB.push_back(w);
+  }
+  std::cout << "Computing <i|j> for ONB: " << std::endl;
+  for (int i = 0; i < nbasis; i++) {
+    for (int j = 0; j < nbasis; j++) {
+      std::cout << GridLogMessage << innerProduct(ONB[i], ONB[j]) << " ";
+    }
+    std::cout << GridLogMessage << std::endl;
+  }
+  */
+  
+  LittleDiracOperator LittleDiracOpPV(geom,FGrid,Coarse5d);
+  LittleDiracOpPV.CoarsenOperator(PVdagM, AggregatesPD);
+
+  std::cout<<GridLogMessage<<std::endl;
+  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
+  std::cout<<GridLogMessage<<std::endl;
+  std::cout<<GridLogMessage<<"Testing coarsened operator "<<std::endl;
+
+  c_src = one;  // 1 in every element for vector 1.
+  blockPromote(c_src,err,subspace);
+
+  prom=Zero();
+  for(int b=0;b<nbasis;b++){
+    prom=prom+subspace[b];
+  }
+  err=err-prom; 
+  std::cout<<GridLogMessage<<"Promoted back from subspace: err "<<norm2(err)<<std::endl;
+  std::cout<<GridLogMessage<<"c_src "<<norm2(c_src)<<std::endl;
+  std::cout<<GridLogMessage<<"prom  "<<norm2(prom)<<std::endl;
+
+  // PVdagM.Op(prom,tmp);
+  // blockProject(c_proj,tmp,subspace);
+  // std::cout<<GridLogMessage<<" Called Big Dirac Op "<<norm2(tmp)<<std::endl;
+
+  // LittleDiracOpPV.M(c_src,c_res);
+  // std::cout<<GridLogMessage<<" Called Little Dirac Op c_src "<< norm2(c_src) << "  c_res "<< norm2(c_res) <<std::endl;
+
+  // std::cout<<GridLogMessage<<"Little dop : "<<norm2(c_res)<<std::endl;
+  // //  std::cout<<GridLogMessage<<" Little "<< c_res<<std::endl;
+  // std::cout<<GridLogMessage<<"Big dop in subspace : "<<norm2(c_proj)<<std::endl;
+  // //  std::cout<<GridLogMessage<<" Big "<< c_proj<<std::endl;
+  // c_proj = c_proj - c_res;
+  // std::cout<<GridLogMessage<<" ldop error: "<<norm2(c_proj)<<std::endl;
+  // //  std::cout<<GridLogMessage<<" error "<< c_proj<<std::endl;
+
+  ///////////////////////////////////////
+  // Coarse grid solver test
+  ///////////////////////////////////////
+
+  std::cout<<GridLogMessage<<"******************* "<<std::endl;
+  std::cout<<GridLogMessage<<" Coarse Grid Solve -- Level 3 "<<std::endl;
+  std::cout<<GridLogMessage<<"******************* "<<std::endl;
+  NonHermitianLinearOperator<LittleDiracOperator,CoarseVector> LinOpCoarse(LittleDiracOpPV);
+  // PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(3.0e-2, 100, LinOpCoarse,simple,10,10); 
+  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(1.0e-1, 100, LinOpCoarse,simple,10,10); 
+  L2PGCR.Level(3);
+  c_res=Zero();
+  L2PGCR(c_src,c_res);
+
+  std::cout << GridLogMessage << "Coarse Grid Solve -- Level 3 operator uses: " << std::endl;
+  PVdagM.getApplications();
+  PVdagM.clear();
+
+  ////////////////////////////////////////
+  // Fine grid smoother
+  ////////////////////////////////////////
+  std::cout<<GridLogMessage<<"******************* "<<std::endl;
+  std::cout<<GridLogMessage<<" Fine Grid Smoother -- Level 2 "<<std::endl;
+  std::cout<<GridLogMessage<<"******************* "<<std::endl;
+  //  NonHermitianLinearOperator<PVdagM_t,LatticeFermionD> LinOpSmooth(PVdagM);
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCR(0.01,1,ShiftedPVdagM,simple_fine,16,16);
+  // TODO: play with this, try 0.1 for the shift (maybe in the ShiftedPVDagM actually)
+  SmootherGCR.Level(2);
+
+  f_src = one;  // 1 in every element for vector 1.
+  f_res=Zero();
+  SmootherGCR(f_src,f_res);
+
+  TwoLevelMG TwoLevelPrecon(AggregatesPD,
+			    PVdagM,
+			    simple_fine,
+			    SmootherGCR,
+			    LinOpCoarse,
+			    L2PGCR);
+  
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCR(1.0e-8,1000,PVdagM,TwoLevelPrecon,16,16);
+  L1PGCR.Level(1);
+
+  f_res=Zero();
+  L1PGCR(f_src,f_res);
+
+  std::cout << GridLogMessage << "Fine Grid Smoother -- Level 2 operator uses: " << std::endl;
+  PVdagM.getApplications();
+  PVdagM.clear();
+
+  // Uncomment to run standard Krylov solve
+  std::cout << GridLogMessage << "Running standard Krylov solve with GCR: " << std::endl; 
+  f_res = Zero();
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> GCR(1.0e-8, 100000, PVdagM, simple_fine, 16, 16);
+  GCR(f_src, f_res);
+
+  PVdagM.getApplications();
+  PVdagM.clear();
+
+}
+
 int main (int argc, char ** argv)
 {
   Grid_init(&argc,&argv);
 
-  const int Ls=16;
+  // TODO read in more parameters: nbasis, GCR iters, smoother order, m
+  // Might be impossible because nbasis needs to be a constant to be a template parameter
+  // Usage : $ ./Example_pvdagm <nbasis> <smooth> <outerIters> <m>
+  // std::string nbasisStr  = argv[1];
+  // std::string smoothStr  = argv[2];
+  // std::string outerStr   = argv[3];
+  // std::string mStr       = argv[4];
+  // int nbasis = std::stoi(nbasisStr);
+  // int smooth = std::stoi(smoothStr);
 
+  // const int Ls=24;
+  const int Ls=16;
+  RealD M5=1.8;
+
+  // RealD mass=0.00078;
+  // RealD mass=0.01;
+  RealD mass=0.001;
+  // const int nbasis = 60;
+  const int nbasis = 40;
+  
+  std::cout << GridLogMessage << "Mass: " << mass << ", Ls: " << Ls << ", running Mobius kernel with b=1.5, c=0.5" << std::endl;
+  std::cout << GridLogMessage << "nbasis: " << nbasis << std::endl;
+
+  // std::vector<int> lat_size {48, 48, 48, 96};
   std::vector<int> lat_size {16, 16, 16, 32};
 
   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(lat_size, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
@@ -271,10 +474,12 @@ int main (int argc, char ** argv)
   // Construct a coarsened grid
   // Coordinate clatt = GridDefaultLatt();
   Coordinate clatt = lat_size;
+  std::cout << GridLogMessage << "Lattice size: " << lat_size << std::endl;
   for(int d=0;d<clatt.size();d++){
     clatt[d] = clatt[d]/2;
     //    clatt[d] = clatt[d]/4;
   }
+  std::cout << GridLogMessage << "constructing coarse grid" << std::endl;
   GridCartesian *Coarse4d =  SpaceTimeGrid::makeFourDimGrid(clatt, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   GridCartesian *Coarse5d =  SpaceTimeGrid::makeFiveDimGrid(1,Coarse4d);
 
@@ -292,12 +497,25 @@ int main (int argc, char ** argv)
   LatticeFermion    err(FGrid);
   LatticeGaugeField Umu(UGrid);
 
+
+  std::cout << GridLogMessage << "Reading in gauge field" << std::endl;
   FieldMetaData header;
-  // std::string file("ckpoint_lat.4000");
   std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
+  // std::string file("/ccs/home/poare/ckpoint_lat.1000");
   NerscIO::readConfiguration(Umu,header,file);
 
-  std::string eigenPath = "/sdcc/u/poare/lqcd/multigrid/spectra/ckpoint_lat.4000/PVdagM_Nm64_Nk32_334102/";
+  // DWF, m=0.01
+  // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_337342/";
+
+  // DWF, m=0.001
+  std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_m0p001_339143/";
+
+  // Mobius, m=0.001
+  // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_346851/";
+
+  // Frontier path
+  // std::string eigenPath = "/ccs/home/poare/lqcd/multigrid/spectra/ckpoint_lat.1000/...";
+  
 
   std::cout << GridLogMessage << "Loading eigenvalues" << std::endl;
   std::ifstream evalFile(eigenPath + "evals.txt");
@@ -318,7 +536,8 @@ int main (int argc, char ** argv)
   }
   std::cout << GridLogMessage << "Eigenvalues: " << evals << std::endl;
 
-  int Nevecs = 32;
+  // int Nevecs = 20;
+  int Nevecs = 40;
   std::vector<LatticeFermion> evecs;
   LatticeFermion evec (FGrid);
   for (int i = 0; i < Nevecs; i++) {
@@ -327,20 +546,20 @@ int main (int argc, char ** argv)
     evecs.push_back(evec);
   }
   std::cout << GridLogMessage << "Evecs loaded" << std::endl;
-  
-  RealD mass=0.01;
-  RealD M5=1.8;
 
-  DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
-  DomainWallFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5);
+  // TODO uncomment when evecs are computed!
 
-  // const int nbasis = 30;
-  // const int nbasis = 20;
-  const int nbasis = 40;
+  // DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
+  // DomainWallFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5);
+
+  // Mobius
+  RealD b=1.5;// Scale factor b+c=2, b-c=1
+  RealD c=0.5;
+  MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
+  MobiusFermionD Dpv(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,M5,b,c);
+
   const int cb = 0 ;
   LatticeFermion prom(FGrid);
-
-  std::cout << GridLogMessage << "nbasis: " << nbasis << std::endl;
 
   // assert(nbasis <= Nevecs);     // need to have enough evecs
 
@@ -353,9 +572,13 @@ int main (int argc, char ** argv)
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   std::cout<<GridLogMessage<<std::endl;
 
-  typedef PVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> PVdagM_t;
-  typedef MdagPVLinearOperator<DomainWallFermionD,LatticeFermionD> MdagPV_t;
-  typedef ShiftedPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedPVdagM_t;
+  // typedef PVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> PVdagM_t;
+  // typedef MdagPVLinearOperator<DomainWallFermionD,LatticeFermionD> MdagPV_t;
+  // typedef ShiftedPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedPVdagM_t;
+  typedef PVdagMLinearOperator<MobiusFermionD,LatticeFermionD> PVdagM_t;
+  typedef MdagPVLinearOperator<MobiusFermionD,LatticeFermionD> MdagPV_t;
+  typedef ShiftedPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedPVdagM_t;
+
   PVdagM_t PVdagM(Ddwf,Dpv);
   MdagPV_t MdagPV(Ddwf,Dpv);
   //  ShiftedPVdagM_t ShiftedPVdagM(2.0,Ddwf,Dpv); // 355
@@ -380,12 +603,22 @@ int main (int argc, char ** argv)
 
   // Run power method on HOA??
   PowerMethod<LatticeFermion>       PM;
-  //  PM(PVdagM,src);
-  //  PM(MdagPV,src);
+
+  CoarseVector c_src (Coarse5d);
+  CoarseVector c_res (Coarse5d);
+  CoarseVector c_proj(Coarse5d);
+  Complex one(1.0);
+
+  std::vector<LatticeFermion> subspace(nbasis,FGrid);
+
+  LatticeFermionD f_src(FGrid);
+  LatticeFermionD f_res(FGrid);
+  typedef MGPreconditioner<vSpinColourVector,  vTComplex,nbasis> TwoLevelMG;
+  TrivialPrecon<CoarseVector> simple;
+  TrivialPrecon<LatticeFermionD> simple_fine;
 
   // Warning: This routine calls PVdagM.Op, not PVdagM.HermOp
   typedef Aggregation<vSpinColourVector,vTComplex,nbasis> Subspace;
-  Subspace AggregatesPD(Coarse5d,FGrid,cb);
 
   // Breeds right singular vectors with call to HermOp (V)
   // int chebyOrd = 500;
@@ -400,214 +633,71 @@ int main (int argc, char ** argv)
 	// 			       0.003,
 	// 			       chebyOrd);
   
-  // Subspace testing
+  // Subspace testing (uncomment blocks when needed)
 
-  // AggregatesPD.CreateSubspace(RNG5,PVdagM,nbasis);      // Note that CG will automatically call PVdagM.HermOp
-  // - nbasis = 20, 36 outer iterations
-  // - nbasis = 40, 24 outer iterations
-  // - the nbasis = 40 result is the one that Peter had with nbasis = 20
+  // - nbasis = 20, m=0.01, 35 outer iterations
+  // - nbasis = 40, m=0.01, 23 outer iterations
+  // std::cout << GridLogMessage << "*** GCR setup ***" << std::endl;
+  // Subspace AggregatesGCR(Coarse5d,FGrid,cb);
+  // AggregatesGCR.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
 
-  AggregatesPD.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
-  // - nbasis = 20, 35 outer iterations
-  // - nbasis = 40, 23 outer iterations
+  // std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
+  // PVdagM.getApplications();
+  // PVdagM.clear();
 
-  // AggregatesPD.CreateSubspaceMultishift(RNG5, PVdagM, 0.003, 1e-4, 2000);
+  // runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
+  //   FGrid, 
+  //   Coarse5d, 
+  //   geom, 
+  //   PVdagM, 
+  //   ShiftedPVdagM, 
+  //   AggregatesGCR
+  // );
 
-  // TODO see if I also want to generate left-singular vectors
-  // Subspace LAggregatesPD (Coarse5d, FGrid, cb);
+  // - nbasis = 20(+20?), m=0.01, 36 outer iterations
+  // - nbasis = 40(+40?), m=0.01, 24 outer iterations
+  // std::cout << GridLogMessage << "*** CG setup ***" << std::endl;
+  // Subspace AggregatesCG(Coarse5d,FGrid,cb);
+  // AggregatesCG.CreateSubspace(RNG5,PVdagM,nbasis);
 
-  
-  LittleDiracOperator LittleDiracOpPV(geom,FGrid,Coarse5d);
-  LittleDiracOpPV.CoarsenOperator(PVdagM,AggregatesPD);
+  // std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
+  // PVdagM.getApplications();
+  // PVdagM.clear();
 
-  std::cout<<GridLogMessage<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<std::endl;
-  std::cout<<GridLogMessage<<"Testing coarsened operator "<<std::endl;
-  
-  CoarseVector c_src (Coarse5d);
-  CoarseVector c_res (Coarse5d);
-  CoarseVector c_proj(Coarse5d);
+  // runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
+  //   FGrid, 
+  //   Coarse5d, 
+  //   geom, 
+  //   PVdagM, 
+  //   ShiftedPVdagM, 
+  //   AggregatesCG
+  // );
 
-  std::vector<LatticeFermion> subspace(nbasis,FGrid);
-  subspace=AggregatesPD.subspace;
+  // Switches to vary for CG: 
+  // - solve tolerance / # of solves in setup
+  // - # deflation vectors
+  // I want to study nulliness and # of deflation vectors vs convergence speed
 
-  Complex one(1.0);
-  c_src = one;  // 1 in every element for vector 1.
-  blockPromote(c_src,err,subspace);
-
-  prom=Zero();
-  for(int b=0;b<nbasis;b++){
-    prom=prom+subspace[b];
-  }
-  err=err-prom; 
-  std::cout<<GridLogMessage<<"Promoted back from subspace: err "<<norm2(err)<<std::endl;
-  std::cout<<GridLogMessage<<"c_src "<<norm2(c_src)<<std::endl;
-  std::cout<<GridLogMessage<<"prom  "<<norm2(prom)<<std::endl;
-
-  PVdagM.Op(prom,tmp);
-  blockProject(c_proj,tmp,subspace);
-  std::cout<<GridLogMessage<<" Called Big Dirac Op "<<norm2(tmp)<<std::endl;
-
-  LittleDiracOpPV.M(c_src,c_res);
-  std::cout<<GridLogMessage<<" Called Little Dirac Op c_src "<< norm2(c_src) << "  c_res "<< norm2(c_res) <<std::endl;
-
-  std::cout<<GridLogMessage<<"Little dop : "<<norm2(c_res)<<std::endl;
-  //  std::cout<<GridLogMessage<<" Little "<< c_res<<std::endl;
-  std::cout<<GridLogMessage<<"Big dop in subspace : "<<norm2(c_proj)<<std::endl;
-  //  std::cout<<GridLogMessage<<" Big "<< c_proj<<std::endl;
-  c_proj = c_proj - c_res;
-  std::cout<<GridLogMessage<<" ldop error: "<<norm2(c_proj)<<std::endl;
-  //  std::cout<<GridLogMessage<<" error "<< c_proj<<std::endl;
-
-
-  /**********
-   * Some solvers
-   **********
-   */
-
-  ///////////////////////////////////////
-  // Coarse grid solver test
-  ///////////////////////////////////////
-
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  std::cout<<GridLogMessage<<" Coarse Grid Solve -- Level 3 "<<std::endl;
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  TrivialPrecon<CoarseVector> simple;
-  NonHermitianLinearOperator<LittleDiracOperator,CoarseVector> LinOpCoarse(LittleDiracOpPV);
-  //  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(1.0e-4, 100, LinOpCoarse,simple,10,10); 
-  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(3.0e-2, 100, LinOpCoarse,simple,10,10); 
-  L2PGCR.Level(3);
-  c_res=Zero();
-  L2PGCR(c_src,c_res);
-
-  ////////////////////////////////////////
-  // Fine grid smoother
-  ////////////////////////////////////////
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  std::cout<<GridLogMessage<<" Fine Grid Smoother -- Level 2 "<<std::endl;
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  TrivialPrecon<LatticeFermionD> simple_fine;
-  //  NonHermitianLinearOperator<PVdagM_t,LatticeFermionD> LinOpSmooth(PVdagM);
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCR(0.01,1,ShiftedPVdagM,simple_fine,16,16);
-  SmootherGCR.Level(2);
-  
-  LatticeFermionD f_src(FGrid);
-  LatticeFermionD f_res(FGrid);
-
-  f_src = one;  // 1 in every element for vector 1.
-  f_res=Zero();
-  SmootherGCR(f_src,f_res);
-
-  typedef MGPreconditioner<vSpinColourVector,  vTComplex,nbasis> TwoLevelMG;
-
-  TwoLevelMG TwoLevelPrecon(AggregatesPD,
-			    PVdagM,
-			    simple_fine,
-			    SmootherGCR,
-			    LinOpCoarse,
-			    L2PGCR);
-  
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCR(1.0e-8,1000,PVdagM,TwoLevelPrecon,16,16);
-  L1PGCR.Level(1);
-
-  f_res=Zero();
-  L1PGCR(f_src,f_res);
-  
-  // same thing but now for the exact Krylov basis
-  std::cout<<GridLogMessage<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"*********** EXACT EIGENVECTORS ************"<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-
-  std::cout << GridLogMessage << "Not running exact KS, nbasis too large" << std::endl;
-
+  // Ritz vectors
+  std::cout << GridLogMessage << "*** KS setup ***" << std::endl;
+  std::cout << GridLogMessage << "Also running standard CG solve for Shamir" << std::endl;
   Subspace AggregatesKS(Coarse5d,FGrid,cb);
   for (int b = 0; b < nbasis; b++) {
     AggregatesKS.subspace[b] = evecs[b];
   }
-  
-  LittleDiracOperator LittleDiracOperatorKS(geom,FGrid,Coarse5d);
-  LittleDiracOperatorKS.CoarsenOperator(PVdagM, AggregatesKS);
 
-  std::cout<<GridLogMessage<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<std::endl;
-  std::cout<<GridLogMessage<<"Testing coarsened operator "<<std::endl;
+  std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
+  PVdagM.getApplications();
+  PVdagM.clear();
 
-  subspace = AggregatesKS.subspace;
-
-  c_src = one;  // 1 in every element for vector 1.
-  blockPromote(c_src,err,subspace);
-
-  prom=Zero();
-  for(int b=0;b<nbasis;b++){
-    prom=prom+subspace[b];
-  }
-  err=err-prom; 
-  std::cout<<GridLogMessage<<"Promoted back from subspace: err "<<norm2(err)<<std::endl;
-  std::cout<<GridLogMessage<<"c_src_KS "<<norm2(c_src)<<std::endl;
-  std::cout<<GridLogMessage<<"prom  "<<norm2(prom)<<std::endl;
-
-  PVdagM.Op(prom,tmp);
-  blockProject(c_proj,tmp,subspace);
-  std::cout<<GridLogMessage<<" Called Big Dirac Op "<<norm2(tmp)<<std::endl;
-
-  LittleDiracOperatorKS.M(c_src,c_res);
-  std::cout<<GridLogMessage<<" Called Little Dirac Op c_src "<< norm2(c_src) << "  c_res "<< norm2(c_res) <<std::endl;
-
-  std::cout<<GridLogMessage<<"Little dop : "<<norm2(c_res)<<std::endl;
-  //  std::cout<<GridLogMessage<<" Little "<< c_res<<std::endl;
-  std::cout<<GridLogMessage<<"Big dop in subspace : "<<norm2(c_proj)<<std::endl;
-  //  std::cout<<GridLogMessage<<" Big "<< c_proj<<std::endl;
-  c_proj = c_proj - c_res;
-  std::cout<<GridLogMessage<<" ldop error: "<<norm2(c_proj)<<std::endl;
-  //  std::cout<<GridLogMessage<<" error "<< c_proj<<std::endl;
-
-  //  **********
-  //  * Some solvers
-  //  **********
-
-  ///////////////////////////////////////
-  // Coarse grid solver test
-  ///////////////////////////////////////
-
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  std::cout<<GridLogMessage<<" Coarse Grid Solve -- Level 3 "<<std::endl;
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  NonHermitianLinearOperator<LittleDiracOperator,CoarseVector> LinOpCoarseKS(LittleDiracOperatorKS);
-  //  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(1.0e-4, 100, LinOpCoarse,simple,10,10); 
-  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCRKS(3.0e-2, 100, LinOpCoarseKS,simple,10,10); 
-  L2PGCRKS.Level(3);
-  c_res=Zero();
-  L2PGCRKS(c_src,c_res);
-
-  ////////////////////////////////////////
-  // Fine grid smoother
-  ////////////////////////////////////////
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  std::cout<<GridLogMessage<<" Fine Grid Smoother -- Level 2 "<<std::endl;
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  //  NonHermitianLinearOperator<PVdagM_t,LatticeFermionD> LinOpSmooth(PVdagM);
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCRKS(0.01,1,ShiftedPVdagM,simple_fine,16,16);
-  SmootherGCRKS.Level(2);
-
-  f_src = one;  // 1 in every element for vector 1.
-  f_res=Zero();
-  SmootherGCRKS(f_src,f_res);
-
-  TwoLevelMG TwoLevelPreconKS(AggregatesKS,
-			    PVdagM,
-			    simple_fine,
-			    SmootherGCRKS,
-			    LinOpCoarseKS,
-			    L2PGCRKS);
-  
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCRKS(1.0e-8,1000,PVdagM,TwoLevelPreconKS,16,16);
-  L1PGCRKS.Level(1);
-
-  f_res=Zero();
-  L1PGCRKS(f_src,f_res);
+  runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
+    FGrid, 
+    Coarse5d, 
+    geom, 
+    PVdagM, 
+    ShiftedPVdagM, 
+    AggregatesKS
+  );
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage << "Done "<< std::endl;

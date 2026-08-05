@@ -384,18 +384,29 @@ int main (int argc, char ** argv)
 
   // std::vector<RealD> shifts = {1.0, 1.2, 1.5, 2.0};
   // RealD shift = 1.2;
-  RealD shift = 1.0;
+  // RealD shift = 1.0;
+  // RealD shift = 0.95;    // this converges
+  // RealD shift = 1.15;    // no converging
+  RealD shift = 1.8;
 
-  int NmW = 64;         // total Krylov basis size
-  int NkW = 16;         // basis vectors kept at each restart
-  int NstopW = 12;       // stop once NstopW eigenvalues have converged
-  int maxIterW = 50000;
+  int NmW = 48;         // total Krylov basis size
+  int NkW = 12;         // basis vectors kept at each restart
+  int NstopW = 8;
+  
+  // int NkW = 24;         // basis vectors kept at each restart
+  // int NstopW = 20;       // stop once NstopW eigenvalues have converged
+  // int NmW = 64;         // total Krylov basis size
+  // int NkW = 32;         // basis vectors kept at each restart
+  // int NstopW = 28;       // stop once NstopW eigenvalues have converged
+  // int maxIterW = 50000;
+  int maxIterW = 100000;
 
   // std::vector<Eigen::VectorXcd> allEvals;
   // for (int i = 0; i < shifts.size(); i++) {
   //   RealD* shift = &shifts[i];
     std::cout << GridLogMessage << "Running KrylovSchur on Dw with shift " << shift << std::endl;
-    KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
+    // KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
+    KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalNormSmall);
     KS(src4, maxIterW, NmW, NkW, NstopW, &shift, true);
     std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shift << "): " << std::endl << KS.getEvals() << std::endl;
   //  allEvals.push_back(KS.getEvals());

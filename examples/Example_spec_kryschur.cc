@@ -358,7 +358,7 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "beta_k: " << std::endl << KrySchur.getBeta() << std::endl;
   // TODO actually probably need extended Rayleigh quotient, i.e. (S \\ b^\dagger) where S is the matrix printed on the line above
 
-  writeEigensystem(KrySchur, outDir);
+  // writeEigensystem(KrySchur, outDir);
 
   /*********************************************************************************************
    *                       OVERLAP OPERATOR SPECTRUM (arXiv:2004.07732)                        *
@@ -419,10 +419,14 @@ int main (int argc, char ** argv)
    * = 1 operator), so the solves are short, but there are O(Nm * maxIter) of them.
    */
 
+  /*
+
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   std::cout<<GridLogMessage<<"********** OVERLAP OPERATOR SPECTRUM ******"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
+
+  /*
 
   /**
    * Applies K_ov = D_PV^{-1} D_dwf(m), the exactly Pauli-Villars preconditioned domain wall
@@ -437,6 +441,7 @@ int main (int argc, char ** argv)
    * and adjoint entry points would each need an extra solve against D_PV^\dagger and are not
    * used here.
    */
+  /*
   class PVinvMLinearOperator : public LinearOperatorBase<LatticeFermionD> {
     typedef CayleyFermion5D<WilsonImplD>                Cayley_t;
     typedef SchurRedBlackDiagTwoSolve<LatticeFermionD>  SchurSolver_t;
@@ -467,7 +472,8 @@ int main (int argc, char ** argv)
   // The Pauli-Villars solve has to be tighter than the eigensolver tolerance (1e-8), otherwise
   // the "matrix" the Arnoldi process sees is not a fixed linear operator and the Krylov
   // relation degrades.
-  RealD pvTol = 1.0e-12;
+  // RealD pvTol = 1.0e-12;
+  RealD pvTol = 1.0e-8;
   int   pvMaxIter = 10000;
   ConjugateGradient<LatticeFermionD>                CG_PV(pvTol, pvMaxIter);
   SchurRedBlackDiagTwoSolve<LatticeFermionD>        SchurSolver_PV(CG_PV);
@@ -478,12 +484,13 @@ int main (int argc, char ** argv)
 
   LatticeFermion srcOv(FGrid); srcOv = src;    // identical starting vector => fair comparison
 
-  KrylovSchur KrySchurOv (PVinvM, FGrid, 1e-8, RF);
+  // KrylovSchur KrySchurOv (PVinvM, FGrid, 1e-8, RF);
+  KrylovSchur KrySchurOv (PVinvM, FGrid, 1e-5, RF);
   KrySchurOv(srcOv, maxIter, Nm, Nk, Nstop);
 
-  Eigen::VectorXcd evalsPV = KrySchur.getEvals();
+  // Eigen::VectorXcd evalsPV = KrySchur.getEvals();
+  // std::vector<RealD> ritzPV = KrySchur.getRitzEstimates();
   Eigen::VectorXcd evalsOv = KrySchurOv.getEvals();
-  std::vector<RealD> ritzPV = KrySchur.getRitzEstimates();
   std::vector<RealD> ritzOv = KrySchurOv.getRitzEstimates();
 
   std::cout << GridLogMessage << "Overlap (D_PV^{-1} D_dwf) eigenvalues: " << std::endl
@@ -503,6 +510,7 @@ int main (int argc, char ** argv)
     }
     fEvalOv.close();
   }
+  */
 
   /*********************************************************************************************
    *                                     COMPARISON                                            *
@@ -518,7 +526,10 @@ int main (int argc, char ** argv)
    *      D_PV^\dagger eigenvalue.  This is the robust measure: it survives any reordering, and
    *      it is small exactly when the paper's claim holds.
    */
-  std::cout<<GridLogMessage<<std::endl;
+  // std::cout<<GridLogMessage<<std::endl;
+
+  /*
+
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   std::cout<<GridLogMessage<<"*********** SPECTRUM COMPARISON ***********"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
@@ -577,6 +588,7 @@ int main (int argc, char ** argv)
             << "If arXiv:2004.07732 is right, the nearest-neighbour deviation should be tiny for "
             << "the eigenvalues nearest the origin and should grow only as |lambda| approaches "
             << "the cutoff (|lambda| ~ 1)." << std::endl;
+  */
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
