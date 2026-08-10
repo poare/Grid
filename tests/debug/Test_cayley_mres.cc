@@ -57,7 +57,8 @@ int main (int argc, char ** argv)
   int threads = GridThread::GetThreads();
   std::cout<<GridLogMessage << "Grid is setup to use "<<threads<<" threads"<<std::endl;
 
-  const int Ls=10;
+  const int Ls=16;
+  // const int Ls=24;
   std::vector < ComplexD  > omegas;
   std::vector < ComplexD  > omegasrev(Ls);
 
@@ -87,7 +88,8 @@ int main (int argc, char ** argv)
   omegas.push_back( std::complex<double>(1.3,0.0));
 #endif
 
-  GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(), 
+  std::vector<int> lat_size {16, 16, 16, 32};
+  GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(lat_size, 
 								   GridDefaultSimd(Nd,vComplex::Nsimd()),
 								   GridDefaultMpi());
   GridRedBlackCartesian * UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
@@ -95,7 +97,7 @@ int main (int argc, char ** argv)
   GridRedBlackCartesian * FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls,UGrid);
 
 
-  GridCartesian         * UGridF   = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(), 
+  GridCartesian         * UGridF   = SpaceTimeGrid::makeFourDimGrid(lat_size, 
 								    GridDefaultSimd(Nd,vComplexF::Nsimd()),
 								    GridDefaultMpi());
   GridRedBlackCartesian * UrbGridF = SpaceTimeGrid::makeFourDimRedBlackGrid(UGridF);
@@ -122,9 +124,12 @@ int main (int argc, char ** argv)
     // SU<Nc>::ColdConfiguration(Umu);
     SU<Nc>::HotConfiguration(RNG4,Umu);
   }
+  // FieldMetaData header;
+  // std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
+  // NerscIO::readConfiguration(Umu,header,file);
 
-  RealD mass=0.3;
-  RealD M5  =1.0;
+  RealD mass=0.001;
+  RealD M5  =1.8;
   std::cout<<GridLogMessage <<"======================"<<std::endl;
   std::cout<<GridLogMessage <<"DomainWallFermion test"<<std::endl;
   std::cout<<GridLogMessage <<"======================"<<std::endl;
@@ -148,13 +153,19 @@ int main (int argc, char ** argv)
   TestConserved<ScaledShamirFermionD>(Dsham,Umu,FGrid,FrbGrid,UGrid,UrbGrid,mass,M5,&RNG4,&RNG5);
 
   std::cout<<GridLogMessage <<"======================"<<std::endl;
-  std::cout<<GridLogMessage <<"ZMobiusFermion test"<<std::endl;
+  std::cout<<GridLogMessage <<"ShamirFermion (unscaled) test"<<std::endl;
   std::cout<<GridLogMessage <<"======================"<<std::endl;
-  for(int s=0;s<Ls;s++) omegasrev[s]=conjugate(omegas[Ls-1-s]);
-  //  for(int s=0;s<Ls;s++) omegasrev[s]=omegas[Ls-1-s];
-  ZMobiusFermionD ZDmob(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,omegas,b,c);
-  ZMobiusFermionD ZDmobrev(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,omegasrev,b,c);
-  TestConserved<ZMobiusFermionD>(ZDmob,Umu,FGrid,FrbGrid,UGrid,UrbGrid,mass,M5,&RNG4,&RNG5,&ZDmobrev);
+  ScaledShamirFermionD Dsham_unscaled(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,1.0);
+  TestConserved<ScaledShamirFermionD>(Dsham_unscaled,Umu,FGrid,FrbGrid,UGrid,UrbGrid,mass,M5,&RNG4,&RNG5);
+
+  // std::cout<<GridLogMessage <<"======================"<<std::endl;
+  // std::cout<<GridLogMessage <<"ZMobiusFermion test"<<std::endl;
+  // std::cout<<GridLogMessage <<"======================"<<std::endl;
+  // for(int s=0;s<Ls;s++) omegasrev[s]=conjugate(omegas[Ls-1-s]);
+  // //  for(int s=0;s<Ls;s++) omegasrev[s]=omegas[Ls-1-s];
+  // ZMobiusFermionD ZDmob(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,omegas,b,c);
+  // ZMobiusFermionD ZDmobrev(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,omegasrev,b,c);
+  // TestConserved<ZMobiusFermionD>(ZDmob,Umu,FGrid,FrbGrid,UGrid,UrbGrid,mass,M5,&RNG4,&RNG5,&ZDmobrev);
 
   Grid_finalize();
 }
@@ -291,6 +302,7 @@ void  TestConserved(Action & Ddwf,
     std::cout<<GridLogMessage<<" t "<<t<<" DmuPAmu "<<DmuPAmu
              <<" PP "<<real(TensorRemove(sumPP[t]))<<" PJ5q "<<real(TensorRemove(sumPJ5q[t]))
              <<" Ward Identity defect " <<(DmuPAmu - 2.*real(TensorRemove(Ddwf.Mass()*sumPP[t] + sumPJ5q[t])))<<std::endl;
+    std::cout<<GridLogMessage<<" t "<<t<<" PA "<<real(TensorRemove(sumPA[t]))<<std::endl;
   }
   
   ///////////////////////////////
@@ -471,8 +483,8 @@ void  TestConserved1(Action & Ddwf, Action & Ddwfrev,
       // Mobius parameters
       auto b=Ddwf.bs[s];
       auto c=Ddwf.cs[s];
-      assert(Ddwfrev.bs[sr]==Ddwf.bs[s]);
-      assert(Ddwfrev.cs[sr]==Ddwf.cs[s]);
+      GRID_ASSERT(Ddwfrev.bs[sr]==Ddwf.bs[s]);
+      GRID_ASSERT(Ddwfrev.cs[sr]==Ddwf.cs[s]);
 
       LatticePropagator tmp(UGrid); 
 

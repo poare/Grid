@@ -425,10 +425,13 @@ void runMG(
   PVdagM.clear();
 
   // Uncomment to run standard Krylov solve
-  // std::cout << GridLogMessage << "Running standard Krylov solve with GCR: " << std::endl; 
-  // f_res = Zero();
-  // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> GCR(1.0e-8, 100000, PVdagM, simple_fine, 16, 16);
-  // GCR(f_src, f_res);
+  std::cout << GridLogMessage << "Running standard Krylov solve with GCR: " << std::endl; 
+  f_res = Zero();
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> GCR(1.0e-8, 100000, PVdagM, simple_fine, 16, 16);
+  GCR(f_src, f_res);
+
+  PVdagM.getApplications();
+  PVdagM.clear();
 
 }
 
@@ -446,17 +449,20 @@ int main (int argc, char ** argv)
   // int nbasis = std::stoi(nbasisStr);
   // int smooth = std::stoi(smoothStr);
 
-  const int Ls=24;
+  // const int Ls=24;
+  const int Ls=16;
   RealD M5=1.8;
 
-  RealD mass=0.00078;
-  const int nbasis = 60;
-  // const int nbasis = 40;
+  // RealD mass=0.00078;
+  RealD mass=0.01;
+  // const int nbasis = 60;
+  const int nbasis = 40;
   
   std::cout << GridLogMessage << "Mass: " << mass << ", Ls: " << Ls << ", running Mobius kernel with b=1.5, c=0.5" << std::endl;
   std::cout << GridLogMessage << "nbasis: " << nbasis << std::endl;
 
-  std::vector<int> lat_size {48, 48, 48, 96};
+  // std::vector<int> lat_size {48, 48, 48, 96};
+  std::vector<int> lat_size {16, 16, 16, 32};
 
   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(lat_size, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   GridRedBlackCartesian * UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
@@ -493,14 +499,12 @@ int main (int argc, char ** argv)
 
   std::cout << GridLogMessage << "Reading in gauge field" << std::endl;
   FieldMetaData header;
-  // std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
-  std::string file("/ccs/home/poare/ckpoint_lat.1000");
+  std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
+  // std::string file("/ccs/home/poare/ckpoint_lat.1000");
   NerscIO::readConfiguration(Umu,header,file);
 
-  /*
-
   // DWF, m=0.01
-  // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_337342/";
+  std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_337342/";
 
   // DWF, m=0.001
   // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_m0p001_339143/";
@@ -531,7 +535,8 @@ int main (int argc, char ** argv)
   }
   std::cout << GridLogMessage << "Eigenvalues: " << evals << std::endl;
 
-  int Nevecs = 20;
+  // int Nevecs = 20;
+  int Nevecs = 40;
   std::vector<LatticeFermion> evecs;
   LatticeFermion evec (FGrid);
   for (int i = 0; i < Nevecs; i++) {
@@ -541,7 +546,6 @@ int main (int argc, char ** argv)
   }
   std::cout << GridLogMessage << "Evecs loaded" << std::endl;
 
-  */
   // TODO uncomment when evecs are computed!
 
   // DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
@@ -632,22 +636,22 @@ int main (int argc, char ** argv)
 
   // - nbasis = 20, m=0.01, 35 outer iterations
   // - nbasis = 40, m=0.01, 23 outer iterations
-  std::cout << GridLogMessage << "*** GCR setup ***" << std::endl;
-  Subspace AggregatesGCR(Coarse5d,FGrid,cb);
-  AggregatesGCR.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
+  // std::cout << GridLogMessage << "*** GCR setup ***" << std::endl;
+  // Subspace AggregatesGCR(Coarse5d,FGrid,cb);
+  // AggregatesGCR.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
 
-  std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
-  PVdagM.getApplications();
-  PVdagM.clear();
+  // std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
+  // PVdagM.getApplications();
+  // PVdagM.clear();
 
-  runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
-    FGrid, 
-    Coarse5d, 
-    geom, 
-    PVdagM, 
-    ShiftedPVdagM, 
-    AggregatesGCR
-  );
+  // runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
+  //   FGrid, 
+  //   Coarse5d, 
+  //   geom, 
+  //   PVdagM, 
+  //   ShiftedPVdagM, 
+  //   AggregatesGCR
+  // );
 
   // - nbasis = 20(+20?), m=0.01, 36 outer iterations
   // - nbasis = 40(+40?), m=0.01, 24 outer iterations
@@ -674,20 +678,25 @@ int main (int argc, char ** argv)
   // I want to study nulliness and # of deflation vectors vs convergence speed
 
   // Ritz vectors
-  // std::cout << GridLogMessage << "*** KS setup ***" << std::endl;
-  // std::cout << GridLogMessage << "Also running standard CG solve for Shamir" << std::endl;
-  // Subspace AggregatesKS(Coarse5d,FGrid,cb);
-  // for (int b = 0; b < nbasis; b++) {
-  //   AggregatesKS.subspace[b] = evecs[b];
-  // }
-  // runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
-  //   FGrid, 
-  //   Coarse5d, 
-  //   geom, 
-  //   PVdagM, 
-  //   ShiftedPVdagM, 
-  //   AggregatesKS
-  // );
+  std::cout << GridLogMessage << "*** KS setup ***" << std::endl;
+  std::cout << GridLogMessage << "Also running standard CG solve for Shamir" << std::endl;
+  Subspace AggregatesKS(Coarse5d,FGrid,cb);
+  for (int b = 0; b < nbasis; b++) {
+    AggregatesKS.subspace[b] = evecs[b];
+  }
+
+  std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
+  PVdagM.getApplications();
+  PVdagM.clear();
+
+  runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
+    FGrid, 
+    Coarse5d, 
+    geom, 
+    PVdagM, 
+    ShiftedPVdagM, 
+    AggregatesKS
+  );
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage << "Done "<< std::endl;
