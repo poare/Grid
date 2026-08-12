@@ -44,25 +44,32 @@
     angles, g(theta') <= Re( e^{-i theta'} z(theta) ).
 
     Usage :
-      $ ./Example_pvdagm_fov <inFile> <outDir> [Nangle] [theta_deg] [m_adj] [Nstop] [Nk] [Nm]
+      $ ./Example_pvdagm_fov --config <file> --outdir <dir> \
+            [--nangle N] [--theta DEG] [--madj M] [--nstop N] [--nk N] [--nm N] \
+            [Grid options]
 
-      inFile    = Gauge configuration to read in (NERSC format).
-      outDir    = Directory to write output to.
-      Nangle    = (Optional) Number of angles in the arc. Default 17. Use an ODD value
-                  so that theta = 0 is sampled and lambda_min(M) is obtained directly.
-      theta_deg = (Optional) Half width of the arc IN DEGREES. Default 90. The sweep
-                  runs over Nangle points spanning [-theta_deg, +theta_deg], so the
-                  total arc is 2*theta_deg wide. Because g(theta) = lambda_min(H_theta)
-                  is a supporting line whose inward normal points along +theta, this
-                  probes W(F) from the directions 180-theta_deg to 180+theta_deg, i.e.
-                  the left-hand side. theta_deg = 30 sweeps [-30, +30] here and so
-                  examines W(F) between 150 and 210 degrees; theta_deg = 90 (the
-                  default) covers the whole left half, 90 to 270 degrees.
-      m_adj     = (Optional) Mass of the adjoint (Pauli-Villars) factor. Default 1.0,
-                  which gives the PVdagM operator.
-      Nstop   = (Optional) Converged eigenvalues sought per angle. Default 1.
-      Nk      = (Optional) Lanczos basis kept per restart. Default 4.
-      Nm      = (Optional) Total Lanczos basis size. Default 8.
+    Options are NAMED, not positional, and may be given in any order alongside Grid's
+    own flags. This matters: Grid_init() reads its flags out of argv but does NOT
+    remove them, so argc still counts --grid, --mpi and the rest and positional
+    indexing would read a Grid flag as a parameter.
+
+      --config <file> = Gauge configuration to read in (NERSC format). REQUIRED.
+      --outdir <dir>  = Directory to write output to. REQUIRED.
+      --nangle N      = Number of angles in the arc. Default 17. Use an ODD value so
+                        that theta = 0 is sampled and lambda_min(M) comes out directly.
+      --theta DEG     = Half width of the arc IN DEGREES. Default 30. The sweep runs
+                        over Nangle points spanning [-DEG, +DEG], so the total arc is
+                        2*DEG wide. Because g(theta) = lambda_min(H_theta) is a
+                        supporting line whose inward normal points along +theta, this
+                        probes W(F) from the directions 180-DEG to 180+DEG, i.e. the
+                        left-hand side. --theta 30 sweeps [-30, +30] here and so
+                        examines W(F) between 150 and 210 degrees; --theta 90 covers
+                        the whole left half, 90 to 270 degrees.
+      --madj M        = Mass of the adjoint (Pauli-Villars) factor. Default 1.0, which
+                        gives the PVdagM operator.
+      --nstop N       = Converged eigenvalues sought per angle. Default 3.
+      --nk N          = Lanczos basis kept per restart. Default 6.
+      --nm N          = Total Lanczos basis size. Default 12.
 
     MEMORY: IRL holds Nm five-dimensional fermion fields simultaneously, plus a
     handful of temporaries.  On 16^3x32 with Ls = 16 one LatticeFermionD is about
@@ -206,22 +213,62 @@ int main (int argc, char ** argv)
   Grid_init(&argc,&argv);
 
   // Usage : $ ./Example_pvdagm_fov <inFile> <outDir> [Nangle] [theta_deg] [m_adj] [Nstop] [Nk] [Nm]
-  assert(argc >= 3 && "usage: Example_pvdagm_fov <inFile> <outDir> [Nangle] [theta_deg] [m_adj] [Nstop] [Nk] [Nm]");
-  std::string file   = argv[1];
-  std::string outDir = argv[2];
-
+  /*
+   * Options are NAMED rather than positional. Grid_init() parses its own flags out of
+   * argv but does not remove them -- it only ever reads through GridCmdOptionExists --
+   * so argc still counts --grid, --mpi, --accelerator-threads and friends, and they
+   * may appear anywhere in the array. Positional indexing therefore picks up a Grid
+   * flag as soon as one is passed, which is what made std::stod("--grid") throw
+   * std::invalid_argument. Named lookup is order independent and immune to however
+   * many Grid flags are present.
+   */
   int   Nangle    = 17;
   RealD theta_deg = 30.0;                   // arc half width in degrees
   RealD m_adj     = 1.0;                    // default: PVdagM
   int   Nstop     = 3;
   int   Nk        = 6;
   int   Nm        = 12;
-  if (argc >= 4) { Nangle    = std::stoi(argv[3]); }
-  if (argc >= 5) { theta_deg = std::stod(argv[4]); }
-  if (argc >= 6) { m_adj     = std::stod(argv[5]); }
-  if (argc >= 7) { Nstop     = std::stoi(argv[6]); }
-  if (argc >= 8) { Nk        = std::stoi(argv[7]); }
-  if (argc >= 9) { Nm        = std::stoi(argv[8]); }
+
+  std::string file, outDir;
+  if (GridCmdOptionExists(argv,argv+argc,"--config")) {
+    file = GridCmdOptionPayload(argv,argv+argc,"--config");
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--outdir")) {
+    outDir = GridCmdOptionPayload(argv,argv+argc,"--outdir");
+  }
+  if (file.empty() || outDir.empty()) {
+    std::cout << GridLogError
+              << "usage: Example_pvdagm_fov --config <file> --outdir <dir> "
+              << "[--nangle N] [--theta DEG] [--madj M] [--nstop N] [--nk N] [--nm N] "
+              << "[Grid options]" << std::endl;
+    Grid_finalize();
+    return 1;
+  }
+
+  if (GridCmdOptionExists(argv,argv+argc,"--nangle")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--nangle");
+    GridCmdOptionInt(s, Nangle);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--theta")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--theta");
+    GridCmdOptionFloat(s, theta_deg);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--madj")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--madj");
+    GridCmdOptionFloat(s, m_adj);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--nstop")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--nstop");
+    GridCmdOptionInt(s, Nstop);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--nk")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--nk");
+    GridCmdOptionInt(s, Nk);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--nm")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--nm");
+    GridCmdOptionInt(s, Nm);
+  }
 
   RealD eresid  = 1.0e-8;
   int   MaxIter = 200;
