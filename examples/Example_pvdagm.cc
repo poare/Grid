@@ -513,7 +513,7 @@ int main (int argc, char ** argv)
   // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_346851/";
 
   // Frontier path
-  std::string eigenPath = "/ccs/home/poare/lqcd/multigrid/spectra/ckpoint_lat.1000/...";
+  // std::string eigenPath = "/ccs/home/poare/lqcd/multigrid/spectra/ckpoint_lat.1000/...";
   
 
   std::cout << GridLogMessage << "Loading eigenvalues" << std::endl;
