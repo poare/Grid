@@ -214,6 +214,71 @@ public:
   }
 };
 
+////////////////////////////////////////////////////////////////////
+// Phase rotated Hermitian part of a general (non-Hermitian) operator
+//
+//    H_theta = 1/2 ( e^{-i theta} A + e^{+i theta} Adag )
+//
+// H_theta is Hermitian for any real theta, and its largest eigenvalue is
+// the support function of the field of values W(A) in the direction theta,
+//
+//    lambda_max(H_theta) = max_{|v|=1} Re( e^{-i theta} <v|A|v> ),
+//
+// so sweeping theta and taking lambda_max traces the supporting half planes
+// of W(A), whose intersection is W(A) itself since W is convex. theta = 0
+// recovers the Hermitian part (A+Adag)/2 and theta = pi its negative, so
+// lambda_min of the Hermitian part is minus lambda_max at theta = pi.
+//
+// H_{theta+pi} = -H_theta, so a sweep over [0,pi) covers the whole boundary
+// provided both ends of the spectrum are extracted at each angle.
+//
+// One application costs one Op and one AdjOp of the wrapped operator. The
+// angle is fixed at construction; build one wrapper per angle.
+////////////////////////////////////////////////////////////////////
+template<class Field>
+class HermitianPartLinearOperator : public LinearOperatorBase<Field> {
+  LinearOperatorBase<Field> &_Mat;
+  RealD    _theta;
+  ComplexD _phase;      // e^{-i theta}
+  ComplexD _phaseConj;  // e^{+i theta}, stored to avoid conj() in the kernel
+public:
+  HermitianPartLinearOperator(LinearOperatorBase<Field> &Mat,RealD theta=0.0)
+    : _Mat(Mat), _theta(theta),
+      _phase    (std::cos(theta),-std::sin(theta)),
+      _phaseConj(std::cos(theta), std::sin(theta)) {};
+  RealD Angle(void){ return _theta; }
+  // Support for coarsening to a multigrid
+  void OpDiag (const Field &in, Field &out) {
+    assert(0);
+  }
+  void OpDir  (const Field &in, Field &out,int dir,int disp) {
+    assert(0);
+  }
+  void OpDirAll  (const Field &in, std::vector<Field> &out){
+    assert(0);
+  };
+  void Op     (const Field &in, Field &out){
+    HermOp(in,out);
+  }
+  void AdjOp     (const Field &in, Field &out){
+    HermOp(in,out);
+  }
+  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
+    HermOp(in,out);
+    ComplexD dot = innerProduct(in,out);
+    n1=real(dot);
+    n2=norm2(out);
+  }
+  void HermOp(const Field &in, Field &out){
+    Field tmp(in.Grid());
+    tmp.Checkerboard() = in.Checkerboard();
+    out.Checkerboard() = in.Checkerboard();
+    _Mat.Op   (in,out);   // A in
+    _Mat.AdjOp(in,tmp);   // Adag in
+    out = 0.5*(_phase*out + _phaseConj*tmp);
+  }
+};
+
 
 ////////////////////////////////////////////////////////////////////
 // Wrap an already herm matrix
