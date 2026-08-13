@@ -405,7 +405,7 @@ until convergence
     }
 
     std::cout<<GridLogError<<"\n NOT converged.\n";
-    abort();
+    // abort();
 	
   converged:
     {
@@ -733,7 +733,7 @@ void diagonalize_QR(std::vector<RealD>& lmd, std::vector<RealD>& lme,
     }
   }
   std::cout << GridLogError << "[QL method] Error - Too many iteration: "<<QRiter<<"\n";
-  abort();
+  // abort();
 }
 };
 

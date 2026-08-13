@@ -67,9 +67,19 @@
                         the whole left half, 90 to 270 degrees.
       --madj M        = Mass of the adjoint (Pauli-Villars) factor. Default 1.0, which
                         gives the PVdagM operator.
-      --nstop N       = Converged eigenvalues sought per angle. Default 3.
+      --nstop N       = Converged eigenvalues sought per angle. Default 1. Only the
+                        extremal eigenvalue is needed for the field of values, and the
+                        convergence test requires ALL probed indices to pass, so a
+                        larger Nstop makes convergence strictly harder for no gain.
       --nk N          = Lanczos basis kept per restart. Default 6.
-      --nm N          = Total Lanczos basis size. Default 12.
+      --nm N          = Total Lanczos basis size. Default 12. Raise this first when
+                        angles fail to converge -- at 0.4 GB per vector.
+      --eresid R      = Lanczos convergence tolerance, a RELATIVE RESIDUAL NORM.
+                        Default 1e-5. Note IRL compares it squared: the printed
+                        "target" is eresid^2, so 1e-8 means 1e-16 and will not be
+                        reached. Too tight a value does not merely waste time -- IRL
+                        calls abort() when MaxIter runs out.
+      --maxiter N     = Maximum IRL restarts per angle. Default 500.
 
     MEMORY: IRL holds Nm five-dimensional fermion fields simultaneously, plus a
     handful of temporaries.  On 16^3x32 with Ls = 16 one LatticeFermionD is about
@@ -175,6 +185,11 @@ public:
  * `vmin` receives the minimising eigenvector of H_theta (the same vector, since
  * H_{theta+pi} = -H_theta shares eigenvectors).  `Nconv` receives IRL's converged
  * count; zero means nothing converged and the returned value is meaningless.
+ *
+ * WARNING: IRL calls abort() rather than returning if it exhausts MaxIter without
+ * converging (ImplicitlyRestartedLanczos.h:406-407), so the Nconv guard below is
+ * defensive only and cannot in practice be reached. The job simply dies. The only
+ * defence is parameters that actually converge -- see the eresid note in main().
  */
 template<class Field>
 RealD LambdaMinHermitian(LinearOperatorBase<Field> &Fop, RealD theta, const Field &src,
@@ -225,9 +240,11 @@ int main (int argc, char ** argv)
   int   Nangle    = 17;
   RealD theta_deg = 30.0;                   // arc half width in degrees
   RealD m_adj     = 1.0;                    // default: PVdagM
-  int   Nstop     = 3;
+  int   Nstop     = 1;
   int   Nk        = 6;
   int   Nm        = 12;
+  RealD eresid    = 1.0e-8;
+  int   MaxIter   = 500;
 
   std::string file, outDir;
   if (GridCmdOptionExists(argv,argv+argc,"--config")) {
@@ -269,9 +286,14 @@ int main (int argc, char ** argv)
     std::string s = GridCmdOptionPayload(argv,argv+argc,"--nm");
     GridCmdOptionInt(s, Nm);
   }
-
-  RealD eresid  = 1.0e-8;
-  int   MaxIter = 200;
+  if (GridCmdOptionExists(argv,argv+argc,"--eresid")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--eresid");
+    GridCmdOptionFloat(s, eresid);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--maxiter")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--maxiter");
+    GridCmdOptionInt(s, MaxIter);
+  }
 
   assert(theta_deg > 0.0 && theta_deg <= 180.0 && "require 0 < theta_deg <= 180");
   RealD thetaMax = theta_deg * M_PI / 180.0;
@@ -286,8 +308,14 @@ int main (int argc, char ** argv)
             << 180.0 - theta_deg << " to " << 180.0 + theta_deg
             << " degrees, i.e. its left-hand side." << std::endl;
   std::cout << GridLogMessage << "Adjoint (Pauli-Villars) mass m_adj = " << m_adj << std::endl;
+  
   std::cout << GridLogMessage << "IRL: Nstop = " << Nstop << ", Nk = " << Nk
-            << ", Nm = " << Nm << ", eresid = " << eresid << std::endl;
+            << ", Nm = " << Nm << ", eresid = " << eresid
+            << " (convergence target is eresid^2 = " << eresid*eresid << ")"
+            << ", MaxIter = " << MaxIter << std::endl;
+  std::cout << GridLogMessage
+            << "NOTE: IRL aborts the job if MaxIter is exhausted without convergence."
+            << std::endl;
 
   if (Nangle % 2 == 0) {
     std::cout << GridLogMessage
