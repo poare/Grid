@@ -240,10 +240,13 @@ int main (int argc, char ** argv)
   int   Nangle    = 17;
   RealD theta_deg = 30.0;                   // arc half width in degrees
   RealD m_adj     = 1.0;                    // default: PVdagM
+  // int   Nstop     = 2;
+  // int   Nk        = 6;
+  // int   Nm        = 12;
   int   Nstop     = 2;
-  int   Nk        = 6;
-  int   Nm        = 12;
-  RealD eresid    = 1.0e-8;
+  int   Nk        = 4;
+  int   Nm        = 48;
+  RealD eresid    = 1.0e-4;
   int   MaxIter   = 500;
 
   std::string file, outDir;
@@ -390,6 +393,9 @@ int main (int argc, char ** argv)
 
     theta[i] = (Nangle == 1) ? 0.0
                              : -thetaMax + 2.0*thetaMax*RealD(i)/RealD(Nangle-1);
+    // theta[i] = 0.0;     // to check Peter's
+
+    std::cout << GridLogMessage << "Running theta = " << theta[i] << std::endl;
 
     LatticeFermion vmin(FGrid);
     int Nconv = 0;
