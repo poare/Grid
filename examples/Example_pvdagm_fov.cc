@@ -240,7 +240,7 @@ int main (int argc, char ** argv)
   int   Nangle    = 17;
   RealD theta_deg = 30.0;                   // arc half width in degrees
   RealD m_adj     = 1.0;                    // default: PVdagM
-  int   Nstop     = 1;
+  int   Nstop     = 2;
   int   Nk        = 6;
   int   Nm        = 12;
   RealD eresid    = 1.0e-8;
