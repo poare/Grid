@@ -46,6 +46,8 @@
     Usage :
       $ ./Example_pvdagm_fov --config <file> --outdir <dir> \
             [--nangle N] [--theta DEG] [--madj M] [--nstop N] [--nk N] [--nm N] \
+            [--eresid R] [--maxiter N] \
+            [--cheby-order N] [--cheby-lo R] [--cheby-hi R] \
             [Grid options]
 
     Options are NAMED, not positional, and may be given in any order alongside Grid's
@@ -67,19 +69,41 @@
                         the whole left half, 90 to 270 degrees.
       --madj M        = Mass of the adjoint (Pauli-Villars) factor. Default 1.0, which
                         gives the PVdagM operator.
-      --nstop N       = Converged eigenvalues sought per angle. Default 1. Only the
+      --nstop N       = Converged eigenvalues sought per angle. Default 2. Only the
                         extremal eigenvalue is needed for the field of values, and the
                         convergence test requires ALL probed indices to pass, so a
-                        larger Nstop makes convergence strictly harder for no gain.
-      --nk N          = Lanczos basis kept per restart. Default 6.
-      --nm N          = Total Lanczos basis size. Default 12. Raise this first when
+                        larger Nstop makes convergence strictly harder. With the
+                        Chebyshev filter on, the extra modes are cheap and the argmin
+                        over them is more robust; unfiltered, keep this small.
+      --nk N          = Lanczos basis kept per restart. Default 4.
+      --nm N          = Total Lanczos basis size. Default 48. Raise this first when
                         angles fail to converge -- at 0.4 GB per vector.
       --eresid R      = Lanczos convergence tolerance, a RELATIVE RESIDUAL NORM.
-                        Default 1e-5. Note IRL compares it squared: the printed
+                        Default 1e-4. Note IRL compares it squared: the printed
                         "target" is eresid^2, so 1e-8 means 1e-16 and will not be
                         reached. Too tight a value does not merely waste time -- IRL
                         calls abort() when MaxIter runs out.
-      --maxiter N     = Maximum IRL restarts per angle. Default 500.
+      --maxiter N     = Maximum IRL restarts per angle. Default 500. With the filter
+                        on, 20 is ample (see Example_pvdagm_halfplane.cc).
+      --cheby-order N = Chebyshev filter order. Default 0, which DISABLES the filter
+                        and runs unaccelerated Lanczos on -H_theta. Any N > 0 turns
+                        the filter on. MUST BE ODD and is forced odd if not: Grid
+                        stores N coefficients with Coeffs[N-1] = 1, so the polynomial
+                        is T_{N-1}, and only an even degree is positive below the
+                        window. An odd degree is negative there, IRL targets away from
+                        the filtered modes, and it never converges. 61 is a good start.
+      --cheby-lo R    = Lower edge of the filter window. Default 0.1. Modes BELOW this
+                        are amplified, everything inside [lo, hi] is damped to |T| <= 1.
+                        It does not need to separate lambda_min from lambda_2 -- it only
+                        needs to sit above lambda_min(H_theta) and below the bulk, and
+                        Lanczos resolves within the amplified block. There is roughly a
+                        decade of slack. If it is set BELOW lambda_min nothing is
+                        amplified and IRL locks onto an arbitrary Ritz value; that case
+                        is detected per angle and reported as a CHECK FAILED.
+      --cheby-hi R    = Upper edge of the filter window. Default 0 = auto, which uses
+                        1.1*sigma_max(F). Since H_theta = Re(e^{-i theta} F) we have
+                        ||H_theta|| <= sigma_max(F) for EVERY theta, so one value is
+                        valid across the whole sweep and needs no per-angle retuning.
 
     MEMORY: IRL holds Nm five-dimensional fermion fields simultaneously, plus a
     handful of temporaries.  On 16^3x32 with Ls = 16 one LatticeFermionD is about
@@ -174,17 +198,35 @@ public:
 /**
  * Algebraically smallest eigenvalue of H_theta, and its eigenvector.
  *
- * Runs IRL on H_{theta+pi} = -H_theta, whose algebraically largest eigenvalue is
- * -lambda_min(H_theta).  IRL targets the algebraically largest, so no shift is
- * needed and there is no wrong-end failure mode.
+ * PolyOp selects which end IRL targets; HermOp is what the tester measures.
  *
- * The largest eigenvalue is located by an explicit argmax over the converged values
- * rather than by assuming eval[0] is the extremal one, so this does not depend on
- * IRL's internal sort order surviving the final deflation.
+ *   chebyOrder == 0 : PolyOp = -H_theta.  IRL targets the algebraically largest, so
+ *                     negating points it at the bottom.  Slow on a clustered bottom
+ *                     -- this is the unaccelerated reference path.
+ *   chebyOrder >  0 : PolyOp = T_{chebyOrder-1} on [chebyLo, chebyHi] applied to
+ *                     H_theta.  Below chebyLo the argument passes -1 and |T| grows
+ *                     like cosh(m acosh|y|).  An EVEN degree m is positive there, so
+ *                     the filter targets the bottom by itself and no negation is used.
+ *                     Grid stores order coefficients with Coeffs[order-1] = 1
+ *                     (Chebyshev.h:94), so the degree is order-1 and `order` must be
+ *                     ODD.  An even `order` gives odd degree, which is NEGATIVE below
+ *                     the window; IRL then targets away from the modes you filtered
+ *                     for and never converges.
  *
- * `vmin` receives the minimising eigenvector of H_theta (the same vector, since
- * H_{theta+pi} = -H_theta shares eigenvectors).  `Nconv` receives IRL's converged
- * count; zero means nothing converged and the returned value is meaningless.
+ * HermOp is plain H_theta in both cases, so eval[] comes back as eigenvalues of
+ * H_theta with the natural sign, and evalMaxApprox (IRL line 245, built from HermOp)
+ * stays rho(H_theta) instead of scaling with the filter's large gain -- eresid keeps
+ * the same meaning on both paths.
+ *
+ * Krylov spaces are invariant under negation, K(-H,v) = K(H,v), so on the unfiltered
+ * path the sign changes only which Ritz values the restart shifts discard.
+ *
+ * The minimum is located by an explicit argmin over the converged values rather than
+ * by assuming eval[0] is the extremal one, so this does not depend on IRL's internal
+ * sort order surviving the final deflation.
+ *
+ * `vmin` receives the minimising eigenvector of H_theta.  `Nconv` receives IRL's
+ * converged count; zero means nothing converged and the returned value is meaningless.
  *
  * WARNING: IRL calls abort() rather than returning if it exhausts MaxIter without
  * converging (ImplicitlyRestartedLanczos.h:406-407), so the Nconv guard below is
@@ -194,12 +236,25 @@ public:
 template<class Field>
 RealD LambdaMinHermitian(LinearOperatorBase<Field> &Fop, RealD theta, const Field &src,
                          Field &vmin, int &Nconv,
-                         int Nstop, int Nk, int Nm, RealD eresid, int MaxIter)
+                         int Nstop, int Nk, int Nm, RealD eresid, int MaxIter,
+                         int chebyOrder, RealD chebyLo, RealD chebyHi)
 {
-  HermitianPartLinearOperator<Field> Hflip(Fop, theta + M_PI);   // = -H_theta
-  PlainHermOp<Field> hermop(Hflip);
+  HermitianPartLinearOperator<Field> Htheta(Fop, theta);          //  H_theta
+  HermitianPartLinearOperator<Field> Hflip (Fop, theta + M_PI);   // -H_theta
 
-  ImplicitlyRestartedLanczos<Field> IRL(hermop, hermop, Nstop, Nk, Nm, eresid, MaxIter);
+  PlainHermOp<Field> hermop(Htheta);      // tester: reports eigenvalues of H_theta
+  PlainHermOp<Field> plainpoly(Hflip);    // unfiltered PolyOp
+
+  // Constructed unconditionally (it holds only coefficients, no fields); main()
+  // guarantees chebyHi > chebyLo even when the filter is disabled.
+  Chebyshev<Field>      Cheby(chebyLo, chebyHi, chebyOrder > 2 ? chebyOrder : 3);
+  FunctionHermOp<Field> chebypoly(Cheby, Htheta);
+
+  LinearFunction<Field> &polyop = (chebyOrder > 0)
+      ? static_cast<LinearFunction<Field>&>(chebypoly)
+      : static_cast<LinearFunction<Field>&>(plainpoly);
+
+  ImplicitlyRestartedLanczos<Field> IRL(polyop, hermop, Nstop, Nk, Nm, eresid, MaxIter);
 
   std::vector<RealD> eval(Nm);
   std::vector<Field> evec(Nm, src.Grid());
@@ -214,13 +269,27 @@ RealD LambdaMinHermitian(LinearOperatorBase<Field> &Fop, RealD theta, const Fiel
     return 0.0;
   }
 
-  int imax = 0;
+  // The tester overwrites eval[] with Rayleigh quotients of H_theta while IRL's sort
+  // order follows PolyOp, so an explicit argmin is right whatever ordering survives
+  // the final deflation.  Same extraction as Example_pvdagm_halfplane.cc.
+  int imin = 0;
   for (int i = 1; i < Nconv; i++) {
-    if (eval[i] > eval[imax]) imax = i;
+    if (eval[i] < eval[imin]) imin = i;
   }
-  vmin = evec[imax];
+  vmin = evec[imin];
 
-  return -eval[imax];        // lambda_min(H_theta) = -lambda_max(-H_theta)
+  // The filter only amplifies what lies BELOW chebyLo.  If the mode we landed on sits
+  // inside the window, nothing was amplified and IRL locked onto an essentially
+  // arbitrary Ritz value -- a wrong answer, not a slow one.  Lower chebyLo and re-run.
+  if (chebyOrder > 0 && eval[imin] >= chebyLo) {
+    std::cout << GridLogError
+              << "CHECK FAILED: at theta = " << theta << " the minimum eigenvalue "
+              << eval[imin] << " is not below the Chebyshev window lower edge "
+              << chebyLo << ". The filter did not bracket the bottom of the spectrum; "
+              << "this value is untrustworthy. Lower --cheby-lo." << std::endl;
+  }
+
+  return eval[imin];        // already lambda_min(H_theta): no sign flip
 }
 
 int main (int argc, char ** argv)
@@ -248,6 +317,9 @@ int main (int argc, char ** argv)
   int   Nm        = 48;
   RealD eresid    = 1.0e-4;
   int   MaxIter   = 500;
+  int   chebyOrder = 0;                     // 0 disables the filter
+  RealD chebyLo    = 0.1;                   // window lower edge; modes below are amplified
+  RealD chebyHi    = 0.0;                   // 0 => auto, 1.1 * sigma_max(F)
 
   std::string file, outDir;
   if (GridCmdOptionExists(argv,argv+argc,"--config")) {
@@ -260,6 +332,8 @@ int main (int argc, char ** argv)
     std::cout << GridLogError
               << "usage: Example_pvdagm_fov --config <file> --outdir <dir> "
               << "[--nangle N] [--theta DEG] [--madj M] [--nstop N] [--nk N] [--nm N] "
+              << "[--eresid R] [--maxiter N] "
+              << "[--cheby-order N] [--cheby-lo R] [--cheby-hi R] "
               << "[Grid options]" << std::endl;
     Grid_finalize();
     return 1;
@@ -293,6 +367,18 @@ int main (int argc, char ** argv)
     std::string s = GridCmdOptionPayload(argv,argv+argc,"--eresid");
     GridCmdOptionFloat(s, eresid);
   }
+  if (GridCmdOptionExists(argv,argv+argc,"--cheby-order")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--cheby-order");
+    GridCmdOptionInt(s, chebyOrder);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--cheby-lo")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--cheby-lo");
+    GridCmdOptionFloat(s, chebyLo);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--cheby-hi")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--cheby-hi");
+    GridCmdOptionFloat(s, chebyHi);
+  }
   if (GridCmdOptionExists(argv,argv+argc,"--maxiter")) {
     std::string s = GridCmdOptionPayload(argv,argv+argc,"--maxiter");
     GridCmdOptionInt(s, MaxIter);
@@ -302,6 +388,14 @@ int main (int argc, char ** argv)
   RealD thetaMax = theta_deg * M_PI / 180.0;
 
   assert(Nstop <= Nk && Nk < Nm && "require Nstop <= Nk < Nm");
+
+  // Grid's Chebyshev is T_{order-1}; an even degree is what stays positive below the
+  // window, so `order` must be odd.  Forced rather than asserted: an even order fails
+  // by silently never converging, which is far harder to diagnose than a nudge here.
+  if (chebyOrder > 0 && chebyOrder % 2 == 0) {
+    chebyOrder++;
+    std::cout << GridLogMessage << "--cheby-order forced odd -> " << chebyOrder << std::endl;
+  }
 
   std::cout << GridLogMessage << "Reading gauge field from: " << file << std::endl;
   std::cout << GridLogMessage << "Angles in arc: " << Nangle
@@ -380,6 +474,21 @@ int main (int argc, char ** argv)
   RealD lambdaMaxFdagF = PM(PVdagM, src);
   std::cout << GridLogMessage << "lambda_max(F^dag F) = " << lambdaMaxFdagF << std::endl;
 
+  // H_theta = Re(e^{-i theta} F), and ||Re(B)|| <= ||B||, so ||H_theta|| <= sigma_max(F)
+  // for EVERY theta.  One window upper edge is therefore valid across the whole sweep;
+  // no per-angle retuning.  (Example_pvdagm_halfplane.cc uses 1.1*lambda_max(H), which
+  // is tighter but angle dependent, and it only ever runs at theta = 0.)
+  RealD sigmaMax = std::sqrt(lambdaMaxFdagF);
+  if (chebyHi <= chebyLo) chebyHi = 1.1 * sigmaMax;
+  std::cout << GridLogMessage << "sigma_max(F) = " << sigmaMax << std::endl;
+  if (chebyOrder > 0) {
+    std::cout << GridLogMessage << "Chebyshev filter: T_" << chebyOrder-1
+              << " on [" << chebyLo << ", " << chebyHi << "]" << std::endl;
+  } else {
+    std::cout << GridLogMessage << "Chebyshev filter DISABLED (--cheby-order 0): "
+              << "unaccelerated Lanczos on -H_theta." << std::endl;
+  }
+
   std::vector<RealD>    theta (Nangle);
   std::vector<RealD>    g     (Nangle);
   std::vector<ComplexD> zpt   (Nangle);
@@ -400,7 +509,8 @@ int main (int argc, char ** argv)
     LatticeFermion vmin(FGrid);
     int Nconv = 0;
     g[i] = LambdaMinHermitian(PVdagM, theta[i], src, vmin, Nconv,
-                              Nstop, Nk, Nm, eresid, MaxIter);
+                              Nstop, Nk, Nm, eresid, MaxIter,
+                              chebyOrder, chebyLo, chebyHi);
     nconv[i] = Nconv;
 
     if (Nconv < 1) {
