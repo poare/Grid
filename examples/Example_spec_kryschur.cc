@@ -21,6 +21,12 @@
                               - $eval is the eigenvalue, formated as "(re,im)".
                               - $ritz is the Ritz estimate of the eigenvalue (deviation from being a true eigenvalue)
       ${outDir}/evec${idx} = Eigenvector $idx written out in SCIDAC format (if LIME is enabled).
+      ${outDir}/rayleigh.txt = Rayleigh quotient R of the Krylov-Schur factorization
+                              D U = U R + u b^\dagger. Each line is `$i $j $re $im`.
+      ${outDir}/bvec.txt   = The b vector of the same factorization, one `$i $re $im` per line.
+                              Header carries k, norm2(u) and beta_k. Together with rayleigh.txt
+                              this is the input to the offline pseudospectra bound
+                              s(z) = sigma_min([z I - R ; b^\dagger]) >= sigma_min(z I - D).
 
     Grid physics library, www.github.com/paboyle/Grid 
 
@@ -50,6 +56,7 @@
     /*  END LEGAL */
 
 #include <cstdlib>
+#include <iomanip>
 
 #include <Grid/Grid.h>
 #include <Grid/lattice/PaddedCell.h>
@@ -78,8 +85,65 @@ template <class T> void writeFile(T& in, std::string const fname){
 }
 
 /**
- * Writes the eigensystem of a Krylov Schur object to a directory. 
- * 
+ * Writes the Krylov-Schur factorization D U = U R + u b^\dag to a directory, for offline
+ * pseudospectra post-processing. The inner bound
+ *
+ *    s(z) = sigma_min( [ z I - R ; b^\dag ] )  >=  sigma_min(z I - D)
+ *
+ * needs R and b only; the basis U never enters, so nothing lattice-sized is written.
+ *
+ * Parameters
+ * ----------
+ * KrylovSchur<Field> KS
+ *    Krylov-Schur object, after the run has completed.
+ * std::string outDir
+ *    Directory to write to.
+ * RealD normU
+ *    norm2(KS.getU()), computed by the caller. norm2 is a global reduction and so must be
+ *    called on every rank, whereas this function is boss-only.
+ */
+template <class Field>
+void writeKSFactorization(KrylovSchur<Field> KS, std::string outDir, RealD normU) {
+
+  Eigen::MatrixXcd R = KS.getRayleighQuotient();
+  Eigen::VectorXcd b = KS.getB();
+  int k = R.rows();
+
+  std::cout << GridLogMessage << "Writing Krylov-Schur factorization, k = " << k
+            << ", norm2(u) = " << normU << std::endl;
+
+  std::string rPath = outDir + "/rayleigh.txt";
+  std::ofstream fR;
+  fR.open(rPath);
+  fR << std::scientific << std::setprecision(16);
+  fR << "# Krylov-Schur Rayleigh quotient R (Schur form, upper triangular)\n";
+  fR << "# k = " << k << "\n";
+  fR << "# columns: i j Re Im\n";
+  for (int i = 0; i < k; i++) {
+    for (int j = 0; j < k; j++) {
+      fR << i << " " << j << " " << R(i,j).real() << " " << R(i,j).imag() << "\n";
+    }
+  }
+  fR.close();
+
+  std::string bPath = outDir + "/bvec.txt";
+  std::ofstream fB;
+  fB.open(bPath);
+  fB << std::scientific << std::setprecision(16);
+  fB << "# Krylov-Schur b vector\n";
+  fB << "# k = " << k << "\n";
+  fB << "# norm2_u = " << normU << "\n";
+  fB << "# beta_k = " << KS.getBeta() << "\n";
+  fB << "# columns: i Re Im\n";
+  for (int i = 0; i < k; i++) {
+    fB << i << " " << b(i).real() << " " << b(i).imag() << "\n";
+  }
+  fB.close();
+}
+
+/**
+ * Writes the eigensystem of a Krylov Schur object to a directory.
+ *
  * Parameters
  * ----------
  * std::string path
@@ -356,239 +420,17 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "Hessenberg: " << std::endl << KrySchur.getRayleighQuotient() << std::endl;
   std::cout << GridLogMessage << "b: " << std::endl << KrySchur.getB() << std::endl;
   std::cout << GridLogMessage << "beta_k: " << std::endl << KrySchur.getBeta() << std::endl;
-  // TODO actually probably need extended Rayleigh quotient, i.e. (S \\ b^\dagger) where S is the matrix printed on the line above
+
+  //  Dump R and b for the offline pseudospectra bound, i.e. the extended Rayleigh quotient
+  //  (R \\ b^\dagger). norm2 is collective, so it is evaluated on every rank before the
+  //  boss-only write.
+  {
+    LatticeFermionD uvec = KrySchur.getU();
+    RealD normU = norm2(uvec);
+    if (FGrid->IsBoss()) { writeKSFactorization(KrySchur, outDir, normU); }
+  }
 
   // writeEigensystem(KrySchur, outDir);
-
-  /*********************************************************************************************
-   *                       OVERLAP OPERATOR SPECTRUM (arXiv:2004.07732)                        *
-   *********************************************************************************************
-   *
-   * "Multigrid for Chiral Lattice Fermions: Domain Wall" (Brower, Clark, Weinberg, et al.,
-   * arXiv:2004.07732) observes the following.  Write P for the permutation into the "permuted
-   * chiral basis", i.e. the 5D transformation built out of the chiral projectors
-   * P_\pm = (1 \pm \gamma_5)/2,
-   *
-   *      P_{s's} = | P_-  P_+   0   ...   0  |
-   *                |  0   P_-  P_+  ...   0  |
-   *                |            ...          |
-   *                | P_+   0   ...  ...  P_- |
-   *
-   * which moves both domain walls onto the s = 1 slice.  In that basis, the *exactly* Pauli-
-   * Villars preconditioned domain wall operator is block lower-triangular,
-   *
-   *      K_DW(m) = (D_PV P)^{-1} D_DW(m) P
-   *              = |     D_ov(m)      0  0  ...  0 |
-   *                | -(1-m) \Delta_2  1  0  ...  0 |
-   *                |         ...                   |
-   *                | -(1-m) \Delta_Ls 0  0  ...  1 |
-   *
-   * where D_PV = D_DW(1) is the Pauli-Villars operator and the (1,1) block is *exactly* the
-   * finite-Ls (truncated-sign-function) overlap operator
-   *
-   *      D_ov(m) = (1+m)/2 + (1-m)/2 \gamma_5 \epsilon_{Ls}[H] ,
-   *
-   * with \epsilon_{Ls}[H] -> sign[H] as Ls -> infinity (Neuberger).  The remaining Ls-1
-   * diagonal blocks are the identity, so the *bulk* (heavy) modes are mapped exactly onto unit
-   * eigenvalues, i.e. onto the cutoff 1/a, independently of Ls, the lattice spacing and the
-   * gauge field.
-   *
-   * Two immediate consequences, both of which we exploit here:
-   *
-   *   (i) P is unitary (it is a permutation built from orthogonal projectors), so it is a
-   *       similarity transformation and drops out of the spectrum.  Therefore
-   *
-   *          spec( D_PV^{-1} D_DW(m) )  =  spec( D_ov(m) )  U  {1, with multiplicity (Ls-1)}
-   *
-   *       There is no need to construct P, or to map between 4D and 5D fields: the low end of
-   *       the spectrum of the 5D operator D_PV^{-1} D_DW(m) *is* the low end of the overlap
-   *       spectrum, since the bulk contamination sits far away at exactly 1.
-   *
-   *  (ii) Inverting D_PV is expensive, so the paper's actual multigrid target operator replaces
-   *       D_PV^{-1} by the (free) D_PV^\dagger, justified by the free-field result
-   *       D_PV D_PV^\dagger = 1 + O(p^4).  That is precisely the operator `PVdagM` whose
-   *       spectrum was computed above.
-   *
-   * The paper's claim (their Fig. 2.5) is that the spectrum of D_PV^\dagger D_DW agrees well
-   * with the effective overlap spectrum D_PV^{-1} D_DW at the low end, deviations being
-   * confined to the large eigenvalues approaching the cutoff scale \pi/a.  Below we test this
-   * directly: we run the same Krylov-Schur solve on D_PV^{-1} D_DW(m) and compare.
-   *
-   * NOTE: every matvec now costs a full 5D Pauli-Villars solve, so this section is *much* more
-   * expensive than the D_PV^\dagger run above.  D_PV is very well conditioned (it is the mass
-   * = 1 operator), so the solves are short, but there are O(Nm * maxIter) of them.
-   */
-
-  /*
-
-  std::cout<<GridLogMessage<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"********** OVERLAP OPERATOR SPECTRUM ******"<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-
-  /*
-
-  /**
-   * Applies K_ov = D_PV^{-1} D_dwf(m), the exactly Pauli-Villars preconditioned domain wall
-   * operator.  Up to the similarity transformation P (which does not move the spectrum) and up
-   * to the (Ls-1)-fold degenerate unit eigenvalues coming from the bulk, this operator has the
-   * spectrum of the finite-Ls overlap operator D_ov(m).
-   *
-   * The operands are held as CayleyFermion5D<WilsonImplD> references so that this works
-   * unchanged for either the DomainWallFermionD or the MobiusFermionD choice made above.
-   *
-   * Only Op() is implemented, since that is all Krylov-Schur (Arnoldi) requires; the Hermitian
-   * and adjoint entry points would each need an extra solve against D_PV^\dagger and are not
-   * used here.
-   */
-  /*
-  class PVinvMLinearOperator : public LinearOperatorBase<LatticeFermionD> {
-    typedef CayleyFermion5D<WilsonImplD>                Cayley_t;
-    typedef SchurRedBlackDiagTwoSolve<LatticeFermionD>  SchurSolver_t;
-
-    Cayley_t      &_Mat;        // D_dwf(m)
-    Cayley_t      &_PV;         // D_PV = D_dwf(1)
-    SchurSolver_t &_PVsolve;    // red-black preconditioned solver used to apply D_PV^{-1}
-
-  public:
-    PVinvMLinearOperator(Cayley_t &Mat, Cayley_t &PV, SchurSolver_t &PVsolve)
-      : _Mat(Mat), _PV(PV), _PVsolve(PVsolve) {};
-
-    void OpDiag (const LatticeFermionD &in, LatticeFermionD &out) {    assert(0);  }
-    void OpDir  (const LatticeFermionD &in, LatticeFermionD &out,int dir,int disp) {    assert(0);  }
-    void OpDirAll  (const LatticeFermionD &in, std::vector<LatticeFermionD> &out){    assert(0);  };
-    void Op     (const LatticeFermionD &in, LatticeFermionD &out){
-      std::cout << "Op: PV^{-1} M "<<std::endl;
-      LatticeFermionD tmp(in.Grid());
-      _Mat.M(in,tmp);              // tmp = D_dwf(m) in
-      out = Zero();                // zero initial guess for the PV solve
-      _PVsolve(_PV,tmp,out);       // out = D_PV^{-1} tmp   (exact up to the CG tolerance)
-    }
-    void AdjOp     (const LatticeFermionD &in, LatticeFermionD &out){    assert(0);  }
-    void HermOpAndNorm(const LatticeFermionD &in, LatticeFermionD &out,RealD &n1,RealD &n2){    assert(0);  }
-    void HermOp(const LatticeFermionD &in, LatticeFermionD &out){    assert(0);  }
-  };
-
-  // The Pauli-Villars solve has to be tighter than the eigensolver tolerance (1e-8), otherwise
-  // the "matrix" the Arnoldi process sees is not a fixed linear operator and the Krylov
-  // relation degrades.
-  // RealD pvTol = 1.0e-12;
-  RealD pvTol = 1.0e-8;
-  int   pvMaxIter = 10000;
-  ConjugateGradient<LatticeFermionD>                CG_PV(pvTol, pvMaxIter);
-  SchurRedBlackDiagTwoSolve<LatticeFermionD>        SchurSolver_PV(CG_PV);
-  PVinvMLinearOperator                              PVinvM(Ddwf, Dpv, SchurSolver_PV);
-
-  std::cout << GridLogMessage << "Running Krylov Schur on D_PV^{-1} D_dwf (effective overlap). "
-            << "PV solver tolerance = " << pvTol << std::endl;
-
-  LatticeFermion srcOv(FGrid); srcOv = src;    // identical starting vector => fair comparison
-
-  // KrylovSchur KrySchurOv (PVinvM, FGrid, 1e-8, RF);
-  KrylovSchur KrySchurOv (PVinvM, FGrid, 1e-5, RF);
-  KrySchurOv(srcOv, maxIter, Nm, Nk, Nstop);
-
-  // Eigen::VectorXcd evalsPV = KrySchur.getEvals();
-  // std::vector<RealD> ritzPV = KrySchur.getRitzEstimates();
-  Eigen::VectorXcd evalsOv = KrySchurOv.getEvals();
-  std::vector<RealD> ritzOv = KrySchurOv.getRitzEstimates();
-
-  std::cout << GridLogMessage << "Overlap (D_PV^{-1} D_dwf) eigenvalues: " << std::endl
-            << evalsOv << std::endl;
-
-  // Write the overlap eigenvalues alongside the D_PV^\dagger ones.  We deliberately do not use
-  // writeEigensystem() here: it would also dump Nk five-dimensional eigenvectors, and it would
-  // overwrite the evals.txt written for the D_PV^\dagger run above.
-  {
-    std::string evalPathOv = outDir + "/evals_overlap.txt";
-    std::cout << GridLogMessage << "Writes to: " << evalPathOv << std::endl;
-    std::ofstream fEvalOv;
-    fEvalOv.open(evalPathOv);
-    for (int i = 0; i < Nk; i++) {
-      fEvalOv << i << " " << evalsOv(i) << " " << ritzOv[i];
-      if (i < Nk - 1) { fEvalOv << "\n"; }
-    }
-    fEvalOv.close();
-  }
-  */
-
-  /*********************************************************************************************
-   *                                     COMPARISON                                            *
-   *********************************************************************************************
-   *
-   * Two views of the same data:
-   *
-   *   1. Index-by-index.  Both runs sorted their Ritz values with the same RitzFilter, so the
-   *      i'th eigenvalue of one list should correspond to the i'th of the other *provided* the
-   *      approximation has not reordered anything.
-   *
-   *   2. Nearest neighbour.  For each overlap eigenvalue we quote the distance to the closest
-   *      D_PV^\dagger eigenvalue.  This is the robust measure: it survives any reordering, and
-   *      it is small exactly when the paper's claim holds.
-   */
-  // std::cout<<GridLogMessage<<std::endl;
-
-  /*
-
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"*********** SPECTRUM COMPARISON ***********"<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-
-  std::string cmpPath = outDir + "/spectrum_comparison.txt";
-  std::ofstream fCmp;
-  fCmp.open(cmpPath);
-  fCmp << "# Comparison of the low spectrum of the Pauli-Villars preconditioned domain wall\n"
-       << "# operator D_PV^dag D_dwf(m) against the effective overlap operator\n"
-       << "# D_ov(m) ~ D_PV^{-1} D_dwf(m)   (cf. arXiv:2004.07732).\n"
-       << "# Ls = " << Ls << ", mass = " << mass << ", M5 = " << M5 << ", b = " << b << ", c = " << c << "\n"
-       << "# idx  lambda_ov  lambda_PVdag  |lambda_ov - lambda_PVdag|  rel  |lambda_ov - nearest_PVdag|  nearest_idx\n";
-
-  RealD maxAbsDiffIdx  = 0.0;    // worst index-by-index absolute deviation
-  RealD maxAbsDiffNear = 0.0;    // worst nearest-neighbour absolute deviation
-
-  std::cout << GridLogMessage
-            << " idx |            lambda_ov            |          lambda_PVdag           |   |diff|   |   rel    | nearest |diff| (idx)"
-            << std::endl;
-
-  for (int i = 0; i < Nk; i++) {
-
-    ComplexD lov = evalsOv(i);
-    ComplexD lpv = evalsPV(i);
-
-    RealD absDiff = abs(lov - lpv);
-    RealD relDiff = (abs(lov) > 0.0) ? absDiff / abs(lov) : 0.0;
-
-    // Nearest D_PV^\dagger eigenvalue to this overlap eigenvalue
-    int   jNear   = 0;
-    RealD nearest = abs(lov - evalsPV(0));
-    for (int j = 1; j < Nk; j++) {
-      RealD d = abs(lov - evalsPV(j));
-      if (d < nearest) { nearest = d; jNear = j; }
-    }
-
-    if (absDiff > maxAbsDiffIdx ) maxAbsDiffIdx  = absDiff;
-    if (nearest > maxAbsDiffNear) maxAbsDiffNear = nearest;
-
-    std::cout << GridLogMessage
-              << std::setw(4) << i << " | " << lov << " | " << lpv << " | "
-              << std::scientific << std::setprecision(3) << absDiff << " | " << relDiff << " | "
-              << nearest << " (" << jNear << ")" << std::defaultfloat << std::endl;
-
-    fCmp << i << " " << lov << " " << lpv << " " << absDiff << " " << relDiff
-         << " " << nearest << " " << jNear << "\n";
-  }
-  fCmp.close();
-  std::cout << GridLogMessage << "Wrote comparison to: " << cmpPath << std::endl;
-
-  std::cout << GridLogMessage << "Max |lambda_ov - lambda_PVdag| (index-matched)      : "
-            << maxAbsDiffIdx  << std::endl;
-  std::cout << GridLogMessage << "Max |lambda_ov - lambda_PVdag| (nearest-neighbour)  : "
-            << maxAbsDiffNear << std::endl;
-  std::cout << GridLogMessage
-            << "If arXiv:2004.07732 is right, the nearest-neighbour deviation should be tiny for "
-            << "the eigenvalues nearest the origin and should grow only as |lambda| approaches "
-            << "the cutoff (|lambda| ~ 1)." << std::endl;
-  */
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
