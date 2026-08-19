@@ -47,7 +47,7 @@
       $ ./Example_pvdagm_fov --config <file> --outdir <dir> \
             [--nangle N] [--theta DEG] [--madj M] [--nstop N] [--nk N] [--nm N] \
             [--eresid R] [--maxiter N] \
-            [--cheby-order N] [--cheby-lo R] [--cheby-hi R] \
+            [--cheby-order N] [--cheby-lo R] [--cheby-hi R] [--write-vecs L] \
             [Grid options]
 
     Options are NAMED, not positional, and may be given in any order alongside Grid's
@@ -100,10 +100,28 @@
                         decade of slack. If it is set BELOW lambda_min nothing is
                         amplified and IRL locks onto an arbitrary Ritz value; that case
                         is detected per angle and reported as a CHECK FAILED.
-      --cheby-hi R    = Upper edge of the filter window. Default 0 = auto, which uses
-                        1.1*sigma_max(F). Since H_theta = Re(e^{-i theta} F) we have
-                        ||H_theta|| <= sigma_max(F) for EVERY theta, so one value is
-                        valid across the whole sweep and needs no per-angle retuning.
+      --cheby-hi R    = Upper edge of the filter window. Default 0 = auto, which measures
+                        1.1*|lambda_max(H_theta)| PER ANGLE with a power iteration
+                        (FieldOfValues.h). The angle-independent alternative
+                        1.1*sigma_max(F) is also a valid upper edge -- H_theta =
+                        Re(e^{-i theta} F) gives ||H_theta|| <= sigma_max(F) for every
+                        theta -- but for a strongly non-normal operator it is far larger
+                        than the true lambda_max(H_theta), and the resulting window is so
+                        wide that the filter is nearly inert. The per-angle measurement
+                        costs about 200 extra operator applications per angle and is only
+                        performed when the filter is on.
+      --write-vecs L  = Comma separated list of ANGLE INDICES (the first column of
+                        fov_left.txt) whose minimising eigenvector should also be written,
+                        as ${outDir}/fov${idx} in SCIDAC format. They are named fov, not
+                        evec: these are eigenvectors of H_theta, not Ritz vectors of F,
+                        which for a non-Hermitian F are different objects. Default empty,
+                        which writes none. Giving any index makes the sweep retain ALL
+                        eigenvectors until the end -- they are produced one angle at a
+                        time and cannot be selected retrospectively -- so budget Nangle
+                        times the per-field size, not the size of the list. Needed to do
+                        anything with a point of W(F) beyond plotting it: e.g. the unit
+                        vector whose Rayleigh quotient is exactly zero, which stagnates the
+                        first step of GMRES/GCR, is built from these.
 
     MEMORY: IRL holds Nm five-dimensional fermion fields simultaneously, plus a
     handful of temporaries.  On 16^3x32 with Ls = 16 one LatticeFermionD is about
@@ -111,11 +129,17 @@
     prints the estimate.  Raise Nm for faster convergence only if the memory is
     there; this is why Nm is on the command line rather than hard coded.
 
+    The sweep itself is operator agnostic and lives in
+    Grid/algorithms/iterative/FieldOfValues.h; this driver only builds F and reports.
+
     Output:
       ${outDir}/fov_left.txt = One line per angle, formatted as
-                            `$idx $theta $g $Re_z $Im_z $Nconv $ok`
+                            `$idx $theta $g $Re_z $Im_z $normFv $Nconv $ok`
                           where ($Re_z, $Im_z) is a point on the left boundary of
                           W(F) and $ok is 0 if any consistency check failed.
+                          $normFv = ||F v|| for the minimising unit vector v, so one
+                          step of GMRES/GCR from r_0 = v reduces the residual by
+                          ||r_1||^2/||r_0||^2 = 1 - |z|^2/$normFv^2.
 
     Grid physics library, www.github.com/paboyle/Grid
 
@@ -152,6 +176,24 @@
 
 using namespace std;
 using namespace Grid;
+
+/**
+ * Writes one field in SCIDAC format. Handed to FieldOfValues::VectorWriter, which cannot
+ * name ScidacWriter itself: Grid/algorithms is parsed before Grid/parallelIO.
+ */
+template <class T> void writeFile(T& in, std::string const fname){
+  #ifdef HAVE_LIME
+    std::cout << Grid::GridLogMessage << "Writes to: " << fname << std::endl;
+    Grid::emptyUserRecord record;
+    Grid::ScidacWriter WR(in.Grid()->IsBoss());
+    WR.open(fname);
+    WR.writeScidacFieldRecord(in,record,0); // Lexico
+    WR.close();
+  #else
+    std::cout << Grid::GridLogError
+              << "Grid was built without LIME; cannot write " << fname << std::endl;
+  #endif
+}
 
 /**
  * F = D_PV^dag D_dwf.  Identical to the operator used in Example_spec_kryschur, minus
@@ -195,103 +237,6 @@ public:
   }
 };
 
-/**
- * Algebraically smallest eigenvalue of H_theta, and its eigenvector.
- *
- * PolyOp selects which end IRL targets; HermOp is what the tester measures.
- *
- *   chebyOrder == 0 : PolyOp = -H_theta.  IRL targets the algebraically largest, so
- *                     negating points it at the bottom.  Slow on a clustered bottom
- *                     -- this is the unaccelerated reference path.
- *   chebyOrder >  0 : PolyOp = T_{chebyOrder-1} on [chebyLo, chebyHi] applied to
- *                     H_theta.  Below chebyLo the argument passes -1 and |T| grows
- *                     like cosh(m acosh|y|).  An EVEN degree m is positive there, so
- *                     the filter targets the bottom by itself and no negation is used.
- *                     Grid stores order coefficients with Coeffs[order-1] = 1
- *                     (Chebyshev.h:94), so the degree is order-1 and `order` must be
- *                     ODD.  An even `order` gives odd degree, which is NEGATIVE below
- *                     the window; IRL then targets away from the modes you filtered
- *                     for and never converges.
- *
- * HermOp is plain H_theta in both cases, so eval[] comes back as eigenvalues of
- * H_theta with the natural sign, and evalMaxApprox (IRL line 245, built from HermOp)
- * stays rho(H_theta) instead of scaling with the filter's large gain -- eresid keeps
- * the same meaning on both paths.
- *
- * Krylov spaces are invariant under negation, K(-H,v) = K(H,v), so on the unfiltered
- * path the sign changes only which Ritz values the restart shifts discard.
- *
- * The minimum is located by an explicit argmin over the converged values rather than
- * by assuming eval[0] is the extremal one, so this does not depend on IRL's internal
- * sort order surviving the final deflation.
- *
- * `vmin` receives the minimising eigenvector of H_theta.  `Nconv` receives IRL's
- * converged count; zero means nothing converged and the returned value is meaningless.
- *
- * WARNING: IRL calls abort() rather than returning if it exhausts MaxIter without
- * converging (ImplicitlyRestartedLanczos.h:406-407), so the Nconv guard below is
- * defensive only and cannot in practice be reached. The job simply dies. The only
- * defence is parameters that actually converge -- see the eresid note in main().
- */
-template<class Field>
-RealD LambdaMinHermitian(LinearOperatorBase<Field> &Fop, RealD theta, const Field &src,
-                         Field &vmin, int &Nconv,
-                         int Nstop, int Nk, int Nm, RealD eresid, int MaxIter,
-                         int chebyOrder, RealD chebyLo, RealD chebyHi)
-{
-  HermitianPartLinearOperator<Field> Htheta(Fop, theta);          //  H_theta
-  HermitianPartLinearOperator<Field> Hflip (Fop, theta + M_PI);   // -H_theta
-
-  PlainHermOp<Field> hermop(Htheta);      // tester: reports eigenvalues of H_theta
-  PlainHermOp<Field> plainpoly(Hflip);    // unfiltered PolyOp
-
-  // Constructed unconditionally (it holds only coefficients, no fields); main()
-  // guarantees chebyHi > chebyLo even when the filter is disabled.
-  Chebyshev<Field>      Cheby(chebyLo, chebyHi, chebyOrder > 2 ? chebyOrder : 3);
-  FunctionHermOp<Field> chebypoly(Cheby, Htheta);
-
-  LinearFunction<Field> &polyop = (chebyOrder > 0)
-      ? static_cast<LinearFunction<Field>&>(chebypoly)
-      : static_cast<LinearFunction<Field>&>(plainpoly);
-
-  ImplicitlyRestartedLanczos<Field> IRL(polyop, hermop, Nstop, Nk, Nm, eresid, MaxIter);
-
-  std::vector<RealD> eval(Nm);
-  std::vector<Field> evec(Nm, src.Grid());
-
-  Nconv = 0;
-  IRL.calc(eval, evec, src, Nconv);
-
-  if (Nconv < 1) {
-    std::cout << GridLogError
-              << "CHECK FAILED: IRL converged " << Nconv << " eigenvalues at theta = "
-              << theta << ". Increase Nm, Nk or MaxIter." << std::endl;
-    return 0.0;
-  }
-
-  // The tester overwrites eval[] with Rayleigh quotients of H_theta while IRL's sort
-  // order follows PolyOp, so an explicit argmin is right whatever ordering survives
-  // the final deflation.  Same extraction as Example_pvdagm_halfplane.cc.
-  int imin = 0;
-  for (int i = 1; i < Nconv; i++) {
-    if (eval[i] < eval[imin]) imin = i;
-  }
-  vmin = evec[imin];
-
-  // The filter only amplifies what lies BELOW chebyLo.  If the mode we landed on sits
-  // inside the window, nothing was amplified and IRL locked onto an essentially
-  // arbitrary Ritz value -- a wrong answer, not a slow one.  Lower chebyLo and re-run.
-  if (chebyOrder > 0 && eval[imin] >= chebyLo) {
-    std::cout << GridLogError
-              << "CHECK FAILED: at theta = " << theta << " the minimum eigenvalue "
-              << eval[imin] << " is not below the Chebyshev window lower edge "
-              << chebyLo << ". The filter did not bracket the bottom of the spectrum; "
-              << "this value is untrustworthy. Lower --cheby-lo." << std::endl;
-  }
-
-  return eval[imin];        // already lambda_min(H_theta): no sign flip
-}
-
 int main (int argc, char ** argv)
 {
   Grid_init(&argc,&argv);
@@ -319,7 +264,8 @@ int main (int argc, char ** argv)
   int   MaxIter   = 500;
   int   chebyOrder = 0;                     // 0 disables the filter
   RealD chebyLo    = 0.1;                   // window lower edge; modes below are amplified
-  RealD chebyHi    = 0.0;                   // 0 => auto, 1.1 * sigma_max(F)
+  RealD chebyHi    = 0.0;                   // 0 => auto, per-angle 1.1*|lambda_max(H_theta)|
+  std::vector<int> writeVecs;               // angle indices whose eigenvector to write
 
   std::string file, outDir;
   if (GridCmdOptionExists(argv,argv+argc,"--config")) {
@@ -333,7 +279,7 @@ int main (int argc, char ** argv)
               << "usage: Example_pvdagm_fov --config <file> --outdir <dir> "
               << "[--nangle N] [--theta DEG] [--madj M] [--nstop N] [--nk N] [--nm N] "
               << "[--eresid R] [--maxiter N] "
-              << "[--cheby-order N] [--cheby-lo R] [--cheby-hi R] "
+              << "[--cheby-order N] [--cheby-lo R] [--cheby-hi R] [--write-vecs L] "
               << "[Grid options]" << std::endl;
     Grid_finalize();
     return 1;
@@ -383,19 +329,13 @@ int main (int argc, char ** argv)
     std::string s = GridCmdOptionPayload(argv,argv+argc,"--maxiter");
     GridCmdOptionInt(s, MaxIter);
   }
-
-  assert(theta_deg > 0.0 && theta_deg <= 180.0 && "require 0 < theta_deg <= 180");
-  RealD thetaMax = theta_deg * M_PI / 180.0;
-
-  assert(Nstop <= Nk && Nk < Nm && "require Nstop <= Nk < Nm");
-
-  // Grid's Chebyshev is T_{order-1}; an even degree is what stays positive below the
-  // window, so `order` must be odd.  Forced rather than asserted: an even order fails
-  // by silently never converging, which is far harder to diagnose than a nudge here.
-  if (chebyOrder > 0 && chebyOrder % 2 == 0) {
-    chebyOrder++;
-    std::cout << GridLogMessage << "--cheby-order forced odd -> " << chebyOrder << std::endl;
+  if (GridCmdOptionExists(argv,argv+argc,"--write-vecs")) {
+    std::string s = GridCmdOptionPayload(argv,argv+argc,"--write-vecs");
+    GridCmdOptionIntVector(s, writeVecs);
   }
+
+  // theta_deg is validated, Nstop <= Nk < Nm is asserted, and an even --cheby-order is
+  // forced odd, all in the FieldOfValues constructor below.  Nothing to repeat here.
 
   std::cout << GridLogMessage << "Reading gauge field from: " << file << std::endl;
   std::cout << GridLogMessage << "Angles in arc: " << Nangle
@@ -474,110 +414,54 @@ int main (int argc, char ** argv)
   RealD lambdaMaxFdagF = PM(PVdagM, src);
   std::cout << GridLogMessage << "lambda_max(F^dag F) = " << lambdaMaxFdagF << std::endl;
 
-  // H_theta = Re(e^{-i theta} F), and ||Re(B)|| <= ||B||, so ||H_theta|| <= sigma_max(F)
-  // for EVERY theta.  One window upper edge is therefore valid across the whole sweep;
-  // no per-angle retuning.  (Example_pvdagm_halfplane.cc uses 1.1*lambda_max(H), which
-  // is tighter but angle dependent, and it only ever runs at theta = 0.)
   RealD sigmaMax = std::sqrt(lambdaMaxFdagF);
-  if (chebyHi <= chebyLo) chebyHi = 1.1 * sigmaMax;
   std::cout << GridLogMessage << "sigma_max(F) = " << sigmaMax << std::endl;
   if (chebyOrder > 0) {
     std::cout << GridLogMessage << "Chebyshev filter: T_" << chebyOrder-1
-              << " on [" << chebyLo << ", " << chebyHi << "]" << std::endl;
+              << " with lower edge " << chebyLo;
+    if (chebyHi > chebyLo) { std::cout << " and upper edge " << chebyHi << std::endl; }
+    else { std::cout << " and per-angle auto upper edge" << std::endl; }
   } else {
     std::cout << GridLogMessage << "Chebyshev filter DISABLED (--cheby-order 0): "
               << "unaccelerated Lanczos on -H_theta." << std::endl;
   }
 
-  std::vector<RealD>    theta (Nangle);
-  std::vector<RealD>    g     (Nangle);
-  std::vector<ComplexD> zpt   (Nangle);
-  std::vector<int>      nconv (Nangle, 0);
-  std::vector<int>      ok    (Nangle, 1);
+  // Everything above this point is operator specific; everything below is not.  The
+  // sweep, its consistency checks, the Chebyshev filtering and the output all live in
+  // Grid/algorithms/iterative/FieldOfValues.h and touch only Op and AdjOp.
+  FieldOfValues<LatticeFermionD> FoV(theta_deg, Nangle, Nstop, Nk, Nm, eresid, MaxIter,
+                                     chebyOrder, chebyLo, chebyHi);
 
-  int nFail = 0;
-
-  RealD t0 = usecond();
-  for (int i = 0; i < Nangle; i++) {
-
-    theta[i] = (Nangle == 1) ? 0.0
-                             : -thetaMax + 2.0*thetaMax*RealD(i)/RealD(Nangle-1);
-    // theta[i] = 0.0;     // to check Peter's
-
-    std::cout << GridLogMessage << "Running theta = " << theta[i] << std::endl;
-
-    LatticeFermion vmin(FGrid);
-    int Nconv = 0;
-    g[i] = LambdaMinHermitian(PVdagM, theta[i], src, vmin, Nconv,
-                              Nstop, Nk, Nm, eresid, MaxIter,
-                              chebyOrder, chebyLo, chebyHi);
-    nconv[i] = Nconv;
-
-    if (Nconv < 1) {
-      ok[i] = 0; nFail++;
-      zpt[i] = ComplexD(0.0,0.0);
-      continue;
-    }
-
-    // z = <v|F|v> / <v|v> is a genuine point of W(F) whatever IRL's convergence did.
-    LatticeFermion Fv(FGrid);
-    PVdagM.Op(vmin, Fv);
-    ComplexD z = innerProduct(vmin, Fv) / RealD(norm2(vmin));
-    zpt[i] = z;
-
-    // Consistency: Re(e^{-i theta} z) is the Rayleigh quotient of H_theta in the
-    // state v, so it must equal lambda_min(H_theta) if v really is the minimiser.
-    RealD rq  = real(z)*std::cos(theta[i]) + imag(z)*std::sin(theta[i]);
-    RealD tol = 1.0e-4 * (std::abs(g[i]) + 1.0);
-    if (std::abs(rq - g[i]) > tol) {
-      ok[i] = 0; nFail++;
-      std::cout << GridLogError
-                << "CHECK FAILED: at theta = " << theta[i] << " the eigenvector's Rayleigh "
-                << "quotient " << rq << " disagrees with the reported lambda_min "
-                << g[i] << ". The eigenpair is not converged." << std::endl;
-    }
-
-    std::cout << GridLogMessage
-              << "angle " << std::setw(4) << i
-              << "  theta = " << theta[i] << " rad (" << theta[i]*180.0/M_PI << " deg)"
-              << "  lambda_min(H_theta) = " << g[i]
-              << "  z = " << z
-              << "  (Nconv = " << Nconv << ")" << std::endl;
+  // Everything the sweep cannot know about itself, because none of it is a property of a
+  // LinearOperatorBase. Written verbatim into the head of fov_left.txt.
+  {
+    std::ostringstream prov;
+    prov << "# F(m_adj, m_l) = D^dag(m_adj) D(m_l), Mobius domain wall\n"
+         << "# Ls = " << Ls << ", m_l = " << mass << ", m_adj = " << m_adj
+         << ", M5 = " << M5 << ", b = " << b << ", c = " << c << "\n"
+         << "# config = " << file << "\n"
+         << "# lambda_max(Fdag F) = " << lambdaMaxFdagF
+         << ", sigma_max(F) = " << sigmaMax << "\n";
+    FoV.Provenance = prov.str();
   }
-  RealD t1 = usecond();
-  std::cout << GridLogMessage << "Sweep took " << (t1-t0)/1.0e6 << " s" << std::endl;
 
-  /*
-   * Pairwise support check.  Each z(theta) is an actual element of W(F), and every
-   * supporting line must lie weakly to its left:
-   *
-   *     g(theta') <= Re( e^{-i theta'} z(theta) )   for all theta, theta'.
-   *
-   * This is a rigorous consequence of g being an infimum over all unit vectors, so a
-   * violation proves that the angle theta' under-converged. It costs no matvecs.
-   */
-  int   nViolate = 0;
-  RealD worst    = 0.0;
-  for (int i = 0; i < Nangle; i++) {
-    if (!ok[i]) continue;
-    for (int j = 0; j < Nangle; j++) {
-      if (!ok[j]) continue;
-      RealD proj = real(zpt[i])*std::cos(theta[j]) + imag(zpt[i])*std::sin(theta[j]);
-      RealD slack = proj - g[j];                       // must be >= 0
-      RealD tol   = 1.0e-4 * (std::abs(g[j]) + 1.0);
-      if (slack < worst) worst = slack;
-      if (slack < -tol) {
-        nViolate++;
-        std::cout << GridLogError
-                  << "CHECK FAILED: supporting line at theta = " << theta[j]
-                  << " (g = " << g[j] << ") cuts off the point z = " << zpt[i]
-                  << " found at theta = " << theta[i] << " by " << -slack
-                  << ". Angle " << j << " is under-converged." << std::endl;
-      }
-    }
+  // FieldOfValues.h sits below parallelIO in Grid's include order and so cannot name
+  // ScidacWriter itself; it writes fields through this hook.
+  FoV.VectorWriter = [](LatticeFermionD &v, const std::string &f) {
+    writeFile(v, f);
+  };
+  FoV.KeepVectors = !writeVecs.empty();
+  if (FoV.KeepVectors) {
+    std::cout << GridLogMessage << "Retaining all " << Nangle
+              << " minimising eigenvectors for output (" << Nangle*fieldGB << " GB)"
+              << std::endl;
   }
-  std::cout << GridLogMessage << "Support check: worst slack = " << worst
-            << " over " << Nangle*Nangle << " ordered pairs" << std::endl;
+
+  std::vector<FieldOfValuesPoint> pts = FoV(PVdagM, src);
+
+  int   nFail    = FoV.nFail;
+  int   nViolate = FoV.SupportCheck(pts);
+  RealD worst    = FoV.worstSlack;
 
   if (nFail || nViolate) {
     std::cout << GridLogError
@@ -596,7 +480,7 @@ int main (int argc, char ** argv)
   bool  haveZero = (Nangle % 2 == 1);
   RealD lambdaMinM = 0.0;
   if (haveZero) {
-    lambdaMinM = g[Nangle/2];                 // theta = 0 sits at the midpoint
+    lambdaMinM = pts[Nangle/2].g;             // theta = 0 sits at the midpoint
     std::cout << GridLogMessage << "lambda_min(M)        = " << lambdaMinM << std::endl;
     std::cout << GridLogMessage << "lambda_min(F + Fdag) = " << 2.0*lambdaMinM
               << "   <-- the quantity quoted in PROJECT.md" << std::endl;
@@ -619,40 +503,8 @@ int main (int argc, char ** argv)
     }
   }
 
-  // Write the sweep
-  std::string fovPath = outDir + "/fov_left.txt";
-  std::cout << GridLogMessage << "Writes to: " << fovPath << std::endl;
-  std::ofstream fFov;
-  fFov.open(fovPath);
-  fFov << "# Left boundary of the field of values of F(m_adj, m_l) = D^dag(m_adj) D(m_l).\n"
-       << "# g(theta) = lambda_min(H_theta) = min_{|v|=1} Re( e^{-i theta} <v|F|v> ), so\n"
-       << "# W(F) lies in every half plane Re( e^{-i theta} z ) >= g(theta).\n"
-       << "# (Re_z, Im_z) is <v|F|v> for the minimising eigenvector: an exact point of W(F).\n"
-       << "# Ls = " << Ls << ", m_l = " << mass << ", m_adj = " << m_adj
-       << ", M5 = " << M5 << ", b = " << b << ", c = " << c << "\n"
-       << "# config = " << file << "\n"
-       << "# arc: theta in [" << -theta_deg << ", " << theta_deg << "] degrees over "
-       << Nangle << " points, probing W(F) from " << 180.0 - theta_deg << " to "
-       << 180.0 + theta_deg << " degrees\n"
-       << "# IRL Nstop = " << Nstop << ", Nk = " << Nk << ", Nm = " << Nm
-       << ", eresid = " << eresid << "\n"
-       << "# consistency: " << nFail << " per-angle failures, "
-       << nViolate << " support violations, worst slack " << worst << "\n"
-       << "# idx  theta  g(theta)  Re_z  Im_z  Nconv  ok\n";
-  for (int i = 0; i < Nangle; i++) {
-    fFov << i << " " << theta[i] << " " << g[i] << " "
-         << real(zpt[i]) << " " << imag(zpt[i]) << " "
-         << nconv[i] << " " << ok[i] << "\n";
-  }
-  if (haveZero) {
-    fFov << "# lambda_min(M) = " << lambdaMinM << "\n";
-    fFov << "# lambda_min(F + Fdag) = " << 2.0*lambdaMinM << "\n";
-  }
-  fFov << "# lambda_max(Fdag F) = " << lambdaMaxFdagF << "\n";
-  if (haveZero && lambdaMinM > 0.0) {
-    fFov << "# EES ratio = " << lambdaMinM*lambdaMinM / lambdaMaxFdagF << "\n";
-  }
-  fFov.close();
+  // Write the sweep, and any requested eigenvectors alongside it.
+  FoV.Write(pts, outDir, writeVecs);
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
