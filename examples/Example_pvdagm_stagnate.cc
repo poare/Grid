@@ -126,6 +126,7 @@
 
 #include <cstdlib>
 #include <iomanip>
+#include <random>
 
 #include <Grid/Grid.h>
 
@@ -261,6 +262,63 @@ Eigen::Vector3d BarycentricOrigin(const Eigen::Vector3cd &z)
   for (int i = 0; i < 3; i++) { A(0,i) = real(z(i)); A(1,i) = imag(z(i)); A(2,i) = 1.0; }
   Eigen::Vector3d rhs(0.0, 0.0, 1.0);
   return A.colPivHouseholderQr().solve(rhs);
+}
+
+/** The least stagnant direction in the subspace: the unit y maximising
+ *  |y^dag B y|^2 / (y^dag G y), i.e. minimising the first-step GCR residual ratio
+ *  1 - |<v|F|v>|^2 / ||F v||^2 for v = V y.
+ *
+ *  This is the opposite extreme from the chord construction and exists to disentangle two
+ *  effects that the random-source comparison confounds. The engineered r_0 both has a zero
+ *  Rayleigh quotient *and* lives in the span of three low-mode vectors, while a random
+ *  source has neither property; an iteration-count gap between them cannot be attributed to
+ *  the stagnation. A source from this same span with the largest available Rayleigh
+ *  quotient holds the spectral content fixed and varies only the stagnation.
+ *
+ *  Random search rather than anything clever: the problem is 2*Nv real dimensions with a
+ *  smooth objective, the matrices are 3x3, and the whole thing is far cheaper than one
+ *  matvec. Deterministic seed so every rank walks the same path -- the ranks each solve the
+ *  dense problem redundantly and must agree, exactly as with the grid in Solve2D.
+ */
+Eigen::VectorXcd MaxRQDirection(const Eigen::MatrixXcd &B, const Eigen::MatrixXcd &G,
+                                RealD &bestReduce, int nsample = 200000, int nrefine = 20000)
+{
+  const int n = B.rows();
+  std::mt19937_64 gen(12345);
+  std::normal_distribution<double> gauss(0.0, 1.0);
+
+  auto reduction = [&](const Eigen::VectorXcd &y) {
+    ComplexD num = ComplexD(y.adjoint()*B*y);
+    RealD    den = real(ComplexD(y.adjoint()*G*y));
+    if (den <= 0.0) return 1.0;                  // F y == 0: no direction to step in
+    return 1.0 - std::norm(num)/den;
+  };
+
+  Eigen::VectorXcd best(n);
+  for (int j = 0; j < n; j++) best(j) = ComplexD(gauss(gen), gauss(gen));
+  best.normalize();
+  bestReduce = reduction(best);
+
+  for (int s = 0; s < nsample; s++) {
+    Eigen::VectorXcd y(n);
+    for (int j = 0; j < n; j++) y(j) = ComplexD(gauss(gen), gauss(gen));
+    y.normalize();
+    RealD r = reduction(y);
+    if (r < bestReduce) { bestReduce = r; best = y; }
+  }
+
+  // Local polish: shrink the step every time a tenth of the budget passes without a gain.
+  RealD step = 0.1;
+  int stale = 0;
+  for (int s = 0; s < nrefine; s++) {
+    Eigen::VectorXcd y(n);
+    for (int j = 0; j < n; j++) y(j) = best(j) + step*ComplexD(gauss(gen), gauss(gen));
+    y.normalize();
+    RealD r = reduction(y);
+    if (r < bestReduce) { bestReduce = r; best = y; stale = 0; }
+    else if (++stale > nrefine/10) { step *= 0.5; stale = 0; }
+  }
+  return best;
 }
 
 int main (int argc, char ** argv)
@@ -408,18 +466,28 @@ int main (int argc, char ** argv)
     V.push_back((1.0/nw)*w);
   }
 
-  // ---- The compression B = V^dag F V --------------------------------------------------
+  // ---- The compressions B = V^dag F V and G = (FV)^dag (FV) ---------------------------
+  // The F V_j are kept rather than discarded: G costs only inner products once they exist,
+  // and it is what lets the control source below be chosen without further matvecs. For a
+  // unit y, <v|F|v> = y^dag B y and ||F v||^2 = y^dag G y with v = V y.
   Eigen::MatrixXcd B(Nv,Nv);
+  Eigen::MatrixXcd G(Nv,Nv);
   {
-    LatticeFermionD FV(FGrid);
+    std::vector<LatticeFermionD> FV(Nv, FGrid);
     for (int j = 0; j < Nv; j++) {
-      PVdagM.Op(V[j], FV);                       // Nv operator applications in total
+      PVdagM.Op(V[j], FV[j]);                    // Nv operator applications in total
       for (int i = 0; i < Nv; i++) {
-        B(i,j) = innerProduct(V[i], FV);
+        B(i,j) = innerProduct(V[i], FV[j]);
+      }
+    }
+    for (int i = 0; i < Nv; i++) {
+      for (int j = 0; j < Nv; j++) {
+        G(i,j) = innerProduct(FV[i], FV[j]);
       }
     }
   }
   std::cout << GridLogMessage << "Compression B = V^dag F V =" << std::endl << B << std::endl;
+  std::cout << GridLogMessage << "Gram G = (F V)^dag (F V) =" << std::endl << G << std::endl;
 
   // Coefficient vectors of the inputs in the orthonormal basis. Each is a unit vector of
   // C^Nv whose Rayleigh quotient under B is the recorded z, which is what makes the dense
@@ -542,6 +610,51 @@ int main (int argc, char ** argv)
       GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
     psi = Zero();
     GCR(r0, psi);
+  }
+
+  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
+  std::cout<<GridLogMessage<<"***** GCR ON THE SAME-SUBSPACE CONTROL ****"<<std::endl;
+  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
+  {
+    // Same three vectors, same spectral content, but the largest available Rayleigh
+    // quotient instead of a zero one. Any iteration-count difference against the
+    // engineered source is then attributable to the stagnation and nothing else.
+    RealD ctlPredict;
+    Eigen::VectorXcd yc = MaxRQDirection(B, G, ctlPredict);
+
+    // The equal-weight combination, reported so the maximiser is visibly not cherry-picked.
+    Eigen::VectorXcd ye = Eigen::VectorXcd::Constant(Nv, ComplexD(1.0,0.0));
+    ye.normalize();
+    ComplexD zeNum = ComplexD(ye.adjoint()*B*ye);
+    RealD    zeDen = real(ComplexD(ye.adjoint()*G*ye));
+    std::cout << GridLogMessage << "Equal-weight y: <v|F|v> = " << zeNum
+              << ", predicted reduction = " << 1.0 - std::norm(zeNum)/zeDen << std::endl;
+    std::cout << GridLogMessage << "Maximiser y   = " << yc.transpose() << std::endl;
+    std::cout << GridLogMessage << "Dense prediction for the maximiser = " << ctlPredict
+              << std::endl;
+
+    LatticeFermionD rc(FGrid); rc = Zero();
+    for (int j = 0; j < Nv; j++) rc = rc + yc(j)*V[j];
+    rc = (1.0/std::sqrt(norm2(rc)))*rc;
+
+    LatticeFermionD Frc(FGrid);
+    PVdagM.Op(rc, Frc);
+    ComplexD zc  = innerProduct(rc, Frc);
+    RealD    nFc = std::sqrt(norm2(Frc));
+    std::cout << GridLogMessage << "Control: <v|F|v> = " << zc
+              << ", ||Fv|| = " << nFc
+              << ", predicted first-step reduction = "
+              << 1.0 - std::norm(zc)/(nFc*nFc) << std::endl;
+
+    if (!outDir.empty()) {
+      std::string cName = outDir + "/stagnate_control";
+      writeFile(rc, cName);
+    }
+
+    PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
+      GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    psi = Zero();
+    GCR(rc, psi);
   }
 
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
