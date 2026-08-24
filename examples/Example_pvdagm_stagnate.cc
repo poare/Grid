@@ -93,10 +93,17 @@
                         the value the sweep used, or B is a compression of a different
                         operator than the one whose field of values was measured and the
                         origin is no longer guaranteed to be inside.
-      --gcr-tol R     = GCR relative residual target. Default 1e-8.
-      --gcr-maxit N   = GCR maximum iterations. Default 200.
-      --mmax N        = GCR search direction depth. Default 8.
-      --nstep N       = GCR steps per restart. Default 8.
+      --gcr-tol R     = Relative residual target. Default 1e-8. Used by both solvers.
+      --gcr-maxit N   = Outer cycles. Default 200. The solve currently runs GMRES, whose
+                        MaxIterations counts *steps* rather than cycles, so it is passed
+                        gcr-maxit * nstep -- the same total step budget the commented-out
+                        GCR would have had.
+      --mmax N        = GCR search direction depth. Default 8. **Unused by GMRES**, which
+                        keeps the whole Arnoldi basis within a cycle and has no truncation
+                        knob. Only takes effect if the GCR blocks are uncommented.
+      --nstep N       = Steps per restart. Default 8. Becomes GMRES's RestartLength.
+                        Beware: GMRES stores nstep+1 fields (~0.4 GB each here), so large
+                        values are a memory knob in a way they are not for GCR.
 
     Grid physics library, www.github.com/paboyle/Grid
 
@@ -595,25 +602,33 @@ int main (int argc, char ** argv)
     writeFile(r0, rName);
   }
 
-  // ---- GCR on the engineered source, then on a random one -----------------------------
-  TrivialPrecon<LatticeFermionD> Prec;
+  TrivialPrecon<LatticeFermionD> Prec;                    // GCR only; unused by GMRES
   LatticeFermionD psi(FGrid);
 
+  Integer gmresMaxIt   = gcrMaxIt * nstep;
+  Integer gmresRestart = nstep;
+
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"****** GCR ON THE ENGINEERED SOURCE *******"<<std::endl;
+  std::cout<<GridLogMessage<<"***** GMRES ON THE ENGINEERED SOURCE ******"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   {
-    // b = r0 with x0 = 0 makes the initial residual exactly r0. PGCR does NOT zero psi
-    // itself (the psi=Zero() at PrecGeneralisedConjugateResidualNonHermitian.h:77 is
-    // commented out), so it has to be done here or the initial residual is garbage.
-    PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
-      GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    // b = r0 with x0 = 0 makes the initial residual exactly r0. Neither solver zeroes psi
+    // for us -- PGCR's psi=Zero() at PrecGeneralisedConjugateResidualNonHermitian.h:77 is
+    // commented out, and GMRES treats psi as an initial guess (line 82) -- so it has to be
+    // done here or the initial residual is garbage.
+    GeneralisedMinimalResidual<LatticeFermionD>
+      GMRES(gcrTol, gmresMaxIt, gmresRestart, false);
     psi = Zero();
-    GCR(r0, psi);
+    GMRES(PVdagM, r0, psi);
+
+    // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
+    //   GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    // psi = Zero();
+    // GCR(r0, psi);
   }
 
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"***** GCR ON THE SAME-SUBSPACE CONTROL ****"<<std::endl;
+  std::cout<<GridLogMessage<<"*** GMRES ON THE SAME-SUBSPACE CONTROL ****"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   {
     // Same three vectors, same spectral content, but the largest available Rayleigh
@@ -651,14 +666,19 @@ int main (int argc, char ** argv)
       writeFile(rc, cName);
     }
 
-    PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
-      GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    GeneralisedMinimalResidual<LatticeFermionD>
+      GMRES(gcrTol, gmresMaxIt, gmresRestart, false);
     psi = Zero();
-    GCR(rc, psi);
+    GMRES(PVdagM, rc, psi);
+
+    // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
+    //   GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    // psi = Zero();
+    // GCR(rc, psi);
   }
 
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"******** GCR ON A RANDOM SOURCE ***********"<<std::endl;
+  std::cout<<GridLogMessage<<"******* GMRES ON A RANDOM SOURCE **********"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   {
     LatticeFermionD rnd(FGrid); random(RNG5, rnd);
@@ -673,10 +693,15 @@ int main (int argc, char ** argv)
               << ", predicted first-step reduction = "
               << 1.0 - std::norm(zr)/(nF*nF) << std::endl;
 
-    PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
-      GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    GeneralisedMinimalResidual<LatticeFermionD>
+      GMRES(gcrTol, gmresMaxIt, gmresRestart, false);
     psi = Zero();
-    GCR(rnd, psi);
+    GMRES(PVdagM, rnd, psi);
+
+    // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
+    //   GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    // psi = Zero();
+    // GCR(rnd, psi);
   }
 
   std::cout<<GridLogMessage<<std::endl;
