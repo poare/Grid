@@ -85,7 +85,11 @@ template <class T> void readFile(T& out, std::string const fname){
   #endif
 }
 
-/** Ritz values from an evals.txt, for labelling only. Empty if the file is absent. */
+/** Ritz values from an evals.txt, for labelling only. Empty if the file is absent.
+ *  Example_spec_kryschur writes `idx (re,im) ritz`, and older runs wrote `idx (re,im)`
+ *  with no Ritz estimate, so the pair is taken from inside the parentheses rather than
+ *  from the tail of the line -- otherwise the optional third column is read as the
+ *  imaginary part. A bare `idx re im [ritz]` is accepted as well. */
 std::vector<ComplexD> readEvals(std::string fname)
 {
   std::vector<ComplexD> ev;
@@ -94,10 +98,21 @@ std::vector<ComplexD> readEvals(std::string fname)
   std::string line;
   while (std::getline(f, line)) {
     if (line.empty() || line[0] == '#') continue;
-    std::istringstream is(line);
-    std::vector<double> tok; double x;
-    while (is >> x) tok.push_back(x);
-    if (tok.size() >= 2) ev.push_back(ComplexD(tok[tok.size()-2], tok[tok.size()-1]));
+    size_t lp = line.find('(');
+    size_t rp = line.find(')', lp == std::string::npos ? 0 : lp);
+    std::string body;
+    if (lp != std::string::npos && rp != std::string::npos) {
+      body = line.substr(lp + 1, rp - lp - 1);
+      for (auto &ch : body) if (ch == ',') ch = ' ';
+      std::istringstream is(body);
+      double re, im;
+      if (is >> re >> im) ev.push_back(ComplexD(re, im));
+    } else {
+      std::istringstream is(line);
+      std::vector<double> tok; double x;
+      while (is >> x) tok.push_back(x);
+      if (tok.size() >= 3) ev.push_back(ComplexD(tok[1], tok[2]));
+    }
   }
   return ev;
 }
