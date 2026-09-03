@@ -373,33 +373,80 @@ int main (int argc, char ** argv)
   GridRedBlackCartesian * FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls,UGrid);
   std::cout << GridLogMessage << "Grids constructed" << std::endl;
 
-  // IRL holds Nm fields at once; warn before allocating rather than after failing.
-  RealD fieldGB = RealD(FGrid->gSites()) * 12.0 * 2.0 * RealD(sizeof(RealD)) / 1.0e9;
-  std::cout << GridLogMessage << "One LatticeFermionD is " << fieldGB << " GB globally; "
-            << "IRL will hold Nm = " << Nm << " of them (" << Nm*fieldGB
-            << " GB) plus temporaries." << std::endl;
-
   std::vector<int> seeds4({1,2,3,4});
   std::vector<int> seeds5({5,6,7,8});
   GridParallelRNG          RNG5(FGrid);   RNG5.SeedFixedIntegers(seeds5);
   GridParallelRNG          RNG4(UGrid);   RNG4.SeedFixedIntegers(seeds4);
 
-  LatticeFermion    src(FGrid); random(RNG5,src);
+  // src is built inside the operator selection block below, because it must live on
+  // whichever grid the swept operator acts on: PV^dag M is five dimensional (FGrid),
+  // the Wilson operator is four dimensional (UGrid).  The memory banner follows it.
   LatticeGaugeField Umu(UGrid);
 
   std::cout << GridLogMessage << "Reading configuration" << std::endl;
   FieldMetaData header;
   NerscIO::readConfiguration(Umu,header,file);
 
-  RealD mass=0.01;
+  RealD mass=0.0;
   RealD M5=1.8;
   RealD b=1.5;// Scale factor b+c=2, b-c=1
   RealD c=0.5;
+
+  // ------------------------------------------------------------------ (1) PV^dag M ----
+  // Five dimensional, on FGrid. Rebind Linop to PVdagM2 / PVdagM3 to sweep a power.
+  /*
   MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
   MobiusFermionD Dpv (Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,m_adj,M5,b,c);
 
   typedef PVdagMLinearOperator<MobiusFermionD,LatticeFermionD> PVdagM_t;
   PVdagM_t PVdagM(Ddwf, Dpv);
+  PowerLinearOperator<LatticeFermionD> PVdagM2(PVdagM, 2);
+  PowerLinearOperator<LatticeFermionD> PVdagM3(PVdagM, 3);
+
+  LatticeFermionD src(FGrid); random(RNG5,src);
+
+  LinearOperatorBase<LatticeFermionD> &Linop    = PVdagM;
+  LinearOperatorBase<LatticeFermionD> &NormalOp = PVdagM;
+  std::string LinopName = "PV^dag M";
+  std::string OpProvenance =
+      std::string("# F(m_adj, m_l) = D^dag(m_adj) D(m_l), Mobius domain wall\n")
+    + "# Ls = " + std::to_string(Ls) + ", m_l = " + std::to_string(mass)
+    + ", m_adj = " + std::to_string(m_adj) + ", M5 = " + std::to_string(M5)
+    + ", b = " + std::to_string(b) + ", c = " + std::to_string(c) + "\n";
+  */
+
+  // -------------------------------------------------------------- (2) Wilson D_W ------
+  // Four dimensional, on UGrid, at bare mass `mass` above. Grid's convention is
+  // diag_mass = 4 + mass (WilsonFermionImplementation.h:66), so `mass` is the bare m_0
+  // and NEGATIVE values are the physically interesting ones -- the Hermitian part is
+  // Herm(D_W) = (4+m) - grad, grad the spin-trivial covariant hopping term with
+  // ||grad|| <= 4, so lambda_min(H_0) = m + delta with delta = 4 - lambda_max(grad) >= 0.
+  // Positive m therefore puts W(D_W) strictly in the right half plane; the sweep only
+  // becomes interesting once m < -delta.
+  WilsonFermionD Dw(Umu,*UGrid,*UrbGrid,mass);
+
+  NonHermitianLinearOperator<WilsonFermionD,LatticeFermionD> Wilson(Dw);
+  MdagMLinearOperator  <WilsonFermionD,LatticeFermionD> WilsonMdagM(Dw);
+
+  LatticeFermionD src(UGrid); random(RNG4,src);
+
+  LinearOperatorBase<LatticeFermionD> &Linop    = Wilson;
+  LinearOperatorBase<LatticeFermionD> &NormalOp = WilsonMdagM;
+  std::string LinopName = "D_W";
+  std::string OpProvenance =
+      std::string("# D_W(m), Wilson, four dimensional (diag_mass = 4 + m)\n")
+    + "# m = " + std::to_string(mass) + "\n";
+  // ------------------------------------------------------------------------------------
+
+  std::cout << GridLogMessage << "Sweeping the field of values of: " << LinopName << std::endl;
+
+  // IRL holds Nm fields at once; warn before allocating rather than after failing.
+  // Taken from src, not FGrid: the Wilson block above puts src on the four dimensional
+  // grid, where a field is Ls times smaller.
+  RealD fieldGB = RealD(src.Grid()->gSites()) * 12.0 * 2.0 * RealD(sizeof(RealD)) / 1.0e9;
+  std::cout << GridLogMessage << "One LatticeFermionD is " << fieldGB << " GB globally; "
+            << "IRL will hold Nm = " << Nm << " of them (" << Nm*fieldGB
+            << " GB) plus temporaries." << std::endl;
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
@@ -411,7 +458,7 @@ int main (int argc, char ** argv)
   // algebraically largest and a bare power iteration is unambiguous here. IRL is not
   // needed for this one number, and would cost another Nm fields.
   PowerMethod<LatticeFermionD> PM;
-  RealD lambdaMaxFdagF = PM(PVdagM, src);
+  RealD lambdaMaxFdagF = PM(NormalOp, src);
   std::cout << GridLogMessage << "lambda_max(F^dag F) = " << lambdaMaxFdagF << std::endl;
 
   RealD sigmaMax = std::sqrt(lambdaMaxFdagF);
@@ -436,9 +483,8 @@ int main (int argc, char ** argv)
   // LinearOperatorBase. Written verbatim into the head of fov_left.txt.
   {
     std::ostringstream prov;
-    prov << "# F(m_adj, m_l) = D^dag(m_adj) D(m_l), Mobius domain wall\n"
-         << "# Ls = " << Ls << ", m_l = " << mass << ", m_adj = " << m_adj
-         << ", M5 = " << M5 << ", b = " << b << ", c = " << c << "\n"
+    prov << "# swept operator = " << LinopName << "\n"
+         << OpProvenance
          << "# config = " << file << "\n"
          << "# lambda_max(Fdag F) = " << lambdaMaxFdagF
          << ", sigma_max(F) = " << sigmaMax << "\n";
@@ -457,7 +503,7 @@ int main (int argc, char ** argv)
               << std::endl;
   }
 
-  std::vector<FieldOfValuesPoint> pts = FoV(PVdagM, src);
+  std::vector<FieldOfValuesPoint> pts = FoV(Linop, src);
 
   int   nFail    = FoV.nFail;
   int   nViolate = FoV.SupportCheck(pts);

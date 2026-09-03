@@ -279,6 +279,34 @@ public:
   }
 };
 
+////////////////////////////////////////////////////////////////////////
+// A^n for a LinearOperatorBase, so a field-of-values or pseudospectrum
+// sweep can run on a power of an operator without knowing how the base
+// operator is built. NOT SquaredLinearOperator in
+// Example_spec_kryschur.cc, which forms the Hermitian M^dag M.
+////////////////////////////////////////////////////////////////////////
+template<class Field>
+class PowerLinearOperator : public LinearOperatorBase<Field> {
+  LinearOperatorBase<Field> &_Mat;
+  int _n;
+public:
+  PowerLinearOperator(LinearOperatorBase<Field> &Mat,int n=2) : _Mat(Mat),_n(n) { assert(n>=1); };
+  void OpDiag (const Field &in, Field &out) { assert(0); }
+  void OpDir  (const Field &in, Field &out,int dir,int disp) { assert(0); }
+  void OpDirAll (const Field &in, std::vector<Field> &out) { assert(0); };
+  void Op (const Field &in, Field &out){
+    Field tmp(in.Grid()); tmp = in;
+    for(int i=0;i<_n;i++){ _Mat.Op(tmp,out); tmp = out; }
+  }
+  void AdjOp (const Field &in, Field &out){          // (D^n)^dag = (D^dag)^n
+    Field tmp(in.Grid()); tmp = in;
+    for(int i=0;i<_n;i++){ _Mat.AdjOp(tmp,out); tmp = out; }
+  }
+  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){ assert(0); }
+  void HermOp(const Field &in, Field &out){
+    Field tmp(in.Grid()); Op(in,tmp); AdjOp(tmp,out);
+  }
+};
 
 ////////////////////////////////////////////////////////////////////
 // Wrap an already herm matrix
