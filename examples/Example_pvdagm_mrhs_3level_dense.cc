@@ -1113,7 +1113,8 @@ int main (int argc, char ** argv)
   // would leave 512 sites, 30720 rows and a ~7.5 GB dense matrix, so the floor wants
   // to be deep. Both numbers scale as nbasis^2 if nbasis is changed.
   Coordinate cclatt = clatt;
-  Coordinate Block2({4,4,4,8});
+  // Coordinate Block2({4,4,4,8});
+  Coordinate Block2({4,4,2,4});
   if ( getenv("BLOCK2") ){ GridCmdOptionIntVector(std::string(getenv("BLOCK2")),Block2); GRID_ASSERT(Block2.size()==4); }
   for(int d=0;d<4;d++){ GRID_ASSERT(clatt[d]%Block2[d]==0); cclatt[d]=clatt[d]/Block2[d]; }
   std::cout << GridLogMessage << "Block2 " << Block2 << "  coarse-coarse lattice " << cclatt << std::endl;

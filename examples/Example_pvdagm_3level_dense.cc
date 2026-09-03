@@ -1049,7 +1049,8 @@ int main (int argc, char ** argv)
   // 2.2.2.2 = 16 sites x nbasis 60 = 960 dense rows. Block2 {2,2,2,2} instead would
   // leave 512 sites, 30720 rows, ~7.5 GB.
   Coordinate Block1({2,2,2,2});
-  Coordinate Block2({4,4,4,8});
+  // Coordinate Block2({4,4,4,8});
+  Coordinate Block2({4,4,2,4});
   for (int d = 0; d < 4; d++) clatt[d] /= Block1[d];
   std::cout << GridLogMessage << "Level 1 coarse lattice: " << clatt << std::endl;
 
