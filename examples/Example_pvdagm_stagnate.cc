@@ -423,7 +423,9 @@ int main (int argc, char ** argv)
   GridCartesian         * FGrid   = SpaceTimeGrid::makeFiveDimGrid(Ls,UGrid);
   GridRedBlackCartesian * FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls,UGrid);
 
+  std::vector<int> seeds4({1,2,3,4});
   std::vector<int> seeds5({5,6,7,8});
+  GridParallelRNG RNG4(UGrid);  RNG4.SeedFixedIntegers(seeds4);
   GridParallelRNG RNG5(FGrid);  RNG5.SeedFixedIntegers(seeds5);
 
   LatticeGaugeField Umu(UGrid);
@@ -435,17 +437,55 @@ int main (int argc, char ** argv)
   RealD M5=1.8;
   RealD b=1.5;
   RealD c=0.5;
+  RealD wilson_mass=-0.75;
+
+  // Everything below this point runs on `Linop`, `OpGrid` and `OpRNG`. Comment one block
+  // in and the other out; nothing else in the file needs to change. The FoV eigenvectors
+  // read from `inDir` must come from a sweep of the SAME operator -- they carry no
+  // provenance, and a 5d/4d mismatch will abort in conformable() rather than give a wrong
+  // answer, but a same-dimension mismatch would not.
+
+  // ------------------------------------------------------------------ (1) PV^dag M ----
+  // Five dimensional, on FGrid. Vectors from Example_pvdagm_fov.cc with block (1) live.
+  /*
   MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
   MobiusFermionD Dpv (Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,m_adj,M5,b,c);
 
   typedef PVdagMLinearOperator<MobiusFermionD,LatticeFermionD> PVdagM_t;
   PVdagM_t PVdagM(Ddwf, Dpv);
+
+  LinearOperatorBase<LatticeFermionD> &Linop  = PVdagM;
+  GridCartesian                       *OpGrid = FGrid;
+  GridParallelRNG                     &OpRNG  = RNG5;
+  std::string LinopName = "PV^dag M";
   std::cout << GridLogMessage << "m_adj = " << m_adj
             << " (must match the sweep that produced " << inDir << ")" << std::endl;
 
+  */
+
+  // -------------------------------------------------------------- (2) Wilson D_W -----
+  // Four dimensional, on UGrid, at bare mass `wilson_mass`. Grid's convention is
+  // diag_mass = 4 + mass (WilsonFermionImplementation.h:66), so this is the bare m_0 and
+  // negative values are the interesting ones. Herm(D_W) is spin-trivial, giving
+  // lambda_min(H_0) = m + delta with delta measured at 0.5635 on ckpoint_lat.4000, so 0
+  // enters W(D_W) only once m < -0.5635. At m = -0.75 the left edge of W is -0.187 while
+  // min Re spec(D_W) is +0.180: the spectrum is still in the right half plane and 0 is
+  // strictly inside W, which is exactly the regime this driver exists to exploit.
+  WilsonFermionD Dw(Umu,*UGrid,*UrbGrid,wilson_mass);
+  NonHermitianLinearOperator<WilsonFermionD,LatticeFermionD> Wilson(Dw);
+
+  LinearOperatorBase<LatticeFermionD> &Linop  = Wilson;
+  GridCartesian                       *OpGrid = UGrid;
+  GridParallelRNG                     &OpRNG  = RNG4;
+  std::string LinopName = "D_W";
+  std::cout << GridLogMessage << "Wilson mass = " << wilson_mass
+            << " (must match the sweep that produced " << inDir << ")" << std::endl;
+
+  std::cout << GridLogMessage << "Swept operator: " << LinopName << std::endl;
+
   // ---- Read the eigenvectors and orthonormalise ---------------------------------------
   std::vector<LatticeFermionD> vin;
-  ReadFieldOfValuesVectors(inDir, vecIdx, vin, FGrid,
+  ReadFieldOfValuesVectors(inDir, vecIdx, vin, OpGrid,
       [](LatticeFermionD &v, const std::string &f) { readFile(v, f); });
   assert((int)vin.size() == Nv && "failed to read the requested vectors");
 
@@ -480,9 +520,9 @@ int main (int argc, char ** argv)
   Eigen::MatrixXcd B(Nv,Nv);
   Eigen::MatrixXcd G(Nv,Nv);
   {
-    std::vector<LatticeFermionD> FV(Nv, FGrid);
+    std::vector<LatticeFermionD> FV(Nv, OpGrid);
     for (int j = 0; j < Nv; j++) {
-      PVdagM.Op(V[j], FV[j]);                    // Nv operator applications in total
+      Linop.Op(V[j], FV[j]);                    // Nv operator applications in total
       for (int i = 0; i < Nv; i++) {
         B(i,j) = innerProduct(V[i], FV[j]);
       }
@@ -578,12 +618,12 @@ int main (int argc, char ** argv)
             << std::endl;
 
   // ---- Assemble r_0 and verify against the real operator ------------------------------
-  LatticeFermionD r0(FGrid); r0 = Zero();
+  LatticeFermionD r0(OpGrid); r0 = Zero();
   for (int j = 0; j < Nv; j++) r0 = r0 + y(j)*V[j];
   r0 = (1.0/std::sqrt(norm2(r0)))*r0;
 
-  LatticeFermionD Fr0(FGrid);
-  PVdagM.Op(r0, Fr0);
+  LatticeFermionD Fr0(OpGrid);
+  Linop.Op(r0, Fr0);
   ComplexD zr0    = innerProduct(r0, Fr0);
   RealD    nFr0   = std::sqrt(norm2(Fr0));
   RealD    reduce = 1.0 - std::norm(zr0)/(nFr0*nFr0);
@@ -603,7 +643,7 @@ int main (int argc, char ** argv)
   }
 
   TrivialPrecon<LatticeFermionD> Prec;                    // GCR only; unused by GMRES
-  LatticeFermionD psi(FGrid);
+  LatticeFermionD psi(OpGrid);
 
   Integer gmresMaxIt   = gcrMaxIt * nstep;
   Integer gmresRestart = nstep;
@@ -619,10 +659,10 @@ int main (int argc, char ** argv)
     GeneralisedMinimalResidual<LatticeFermionD>
       GMRES(gcrTol, gmresMaxIt, gmresRestart, false);
     psi = Zero();
-    GMRES(PVdagM, r0, psi);
+    GMRES(Linop, r0, psi);
 
     // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
-    //   GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    //   GCR(gcrTol, gcrMaxIt, Linop, Prec, mmax, nstep);
     // psi = Zero();
     // GCR(r0, psi);
   }
@@ -648,12 +688,12 @@ int main (int argc, char ** argv)
     std::cout << GridLogMessage << "Dense prediction for the maximiser = " << ctlPredict
               << std::endl;
 
-    LatticeFermionD rc(FGrid); rc = Zero();
+    LatticeFermionD rc(OpGrid); rc = Zero();
     for (int j = 0; j < Nv; j++) rc = rc + yc(j)*V[j];
     rc = (1.0/std::sqrt(norm2(rc)))*rc;
 
-    LatticeFermionD Frc(FGrid);
-    PVdagM.Op(rc, Frc);
+    LatticeFermionD Frc(OpGrid);
+    Linop.Op(rc, Frc);
     ComplexD zc  = innerProduct(rc, Frc);
     RealD    nFc = std::sqrt(norm2(Frc));
     std::cout << GridLogMessage << "Control: <v|F|v> = " << zc
@@ -669,10 +709,10 @@ int main (int argc, char ** argv)
     GeneralisedMinimalResidual<LatticeFermionD>
       GMRES(gcrTol, gmresMaxIt, gmresRestart, false);
     psi = Zero();
-    GMRES(PVdagM, rc, psi);
+    GMRES(Linop, rc, psi);
 
     // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
-    //   GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    //   GCR(gcrTol, gcrMaxIt, Linop, Prec, mmax, nstep);
     // psi = Zero();
     // GCR(rc, psi);
   }
@@ -681,11 +721,11 @@ int main (int argc, char ** argv)
   std::cout<<GridLogMessage<<"******* GMRES ON A RANDOM SOURCE **********"<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   {
-    LatticeFermionD rnd(FGrid); random(RNG5, rnd);
+    LatticeFermionD rnd(OpGrid); random(OpRNG, rnd);
     rnd = (1.0/std::sqrt(norm2(rnd)))*rnd;
 
-    LatticeFermionD Frnd(FGrid);
-    PVdagM.Op(rnd, Frnd);
+    LatticeFermionD Frnd(OpGrid);
+    Linop.Op(rnd, Frnd);
     ComplexD zr = innerProduct(rnd, Frnd);
     RealD    nF = std::sqrt(norm2(Frnd));
     std::cout << GridLogMessage << "Control: <v|F|v> = " << zr
@@ -696,10 +736,10 @@ int main (int argc, char ** argv)
     GeneralisedMinimalResidual<LatticeFermionD>
       GMRES(gcrTol, gmresMaxIt, gmresRestart, false);
     psi = Zero();
-    GMRES(PVdagM, rnd, psi);
+    GMRES(Linop, rnd, psi);
 
     // PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD>
-    //   GCR(gcrTol, gcrMaxIt, PVdagM, Prec, mmax, nstep);
+    //   GCR(gcrTol, gcrMaxIt, Linop, Prec, mmax, nstep);
     // psi = Zero();
     // GCR(rnd, psi);
   }
