@@ -258,8 +258,10 @@ int main (int argc, char ** argv)
   // int   Nk        = 6;
   // int   Nm        = 12;
   int   Nstop     = 2;
-  int   Nk        = 4;
-  int   Nm        = 48;
+  int   Nk        = 2;
+  // int   Nk        = 4;
+  // int   Nm        = 48;
+  int   Nm        = 100;
   RealD eresid    = 1.0e-4;
   int   MaxIter   = 500;
   int   chebyOrder = 0;                     // 0 disables the filter
@@ -387,7 +389,9 @@ int main (int argc, char ** argv)
   FieldMetaData header;
   NerscIO::readConfiguration(Umu,header,file);
 
-  RealD mass=0.0;
+  // RealD mass=0.0;
+  RealD mass = -0.75;
+
   RealD M5=1.8;
   RealD b=1.5;// Scale factor b+c=2, b-c=1
   RealD c=0.5;

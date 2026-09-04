@@ -1137,8 +1137,8 @@ int main (int argc, char ** argv)
     std::cout << GridLogMessage << "Subspace generation: PVdagM operator uses:" << std::endl;
     PVdagM.getApplications();
     PVdagM.clear();
-    saveSubspace(AggregatesGCR.subspace, subspace_file);
-    std::cout << GridLogMessage << "Subspace saved to: " << subspace_file << std::endl;
+    // saveSubspace(AggregatesGCR.subspace, subspace_file);
+    // std::cout << GridLogMessage << "Subspace saved to: " << subspace_file << std::endl;
   }
 
   runMG<nbasis,PVdagM_t,ShiftedPVdagM_t,Subspace,LittleDiracOperator,CoarseVector,TwoLevelMG>(

@@ -365,13 +365,16 @@ int main (int argc, char ** argv)
   GridParallelRNG          RNG5(FGrid);   RNG5.SeedFixedIntegers(seeds5);
   GridParallelRNG          RNG4(UGrid);   RNG4.SeedFixedIntegers(seeds4);
 
-  LatticeFermion    src(FGrid); random(RNG5,src);
+  LatticeFermion    src(UGrid); random(RNG4,src);
+  // LatticeFermion    src(FGrid); random(RNG5,src);
   LatticeGaugeField Umu(UGrid);
 
   std::cout << GridLogMessage << "Reading configuration" << std::endl;
   FieldMetaData header;
   NerscIO::readConfiguration(Umu,header,file);
 
+  /*
+  std::cout << GridLogMessage << "PVdagM Operator" << std::endl;
   RealD mass=0.01;
   // RealD mass=0.001;
   RealD M5=1.8;
@@ -386,7 +389,7 @@ int main (int argc, char ** argv)
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
   std::cout<<GridLogMessage<<std::endl;
-
+  
   // typedef PVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> PVdagM_t;
   // typedef ShiftedPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedPVdagM_t;
   // typedef ShiftedComplexPVdagMLinearOperator<DomainWallFermionD,LatticeFermionD> ShiftedComplexPVdagM_t;
@@ -398,6 +401,13 @@ int main (int argc, char ** argv)
   ShiftedPVdagM_t ShiftedPVdagM(0.1,Ddwf,Dpv);
   // NonHermitianLinearOperator<DomainWallFermionD, LatticeFermionD> DLinOp (Ddwf);
   NonHermitianLinearOperator<MobiusFermionD, LatticeFermionD> DLinOp (Ddwf);
+  */
+
+  std::cout << GridLogMessage << "Wilson Operator" << std::endl;
+  // RealD mass = 0.0;
+  RealD mass = -0.75;
+  WilsonFermionD Dw(Umu, *UGrid, *UrbGrid, mass);
+  NonHermitianLinearOperator<WilsonFermionD,LatticeFermionD> DLinOp(Dw);
 
   int Nm = std::stoi(NmStr);
   int Nk = std::stoi(NkStr);
@@ -407,8 +417,9 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "Runnning Krylov Schur. Nm = " << Nm << ", Nk = " << Nk << ", maxIter = " << maxIter 
                   << ", Nstop = " << Nstop << std::endl;
   
-  KrylovSchur KrySchur (PVdagM, FGrid, 1e-8, RF);      // use preconditioned PV^\dag D_{dwf}
-  // KrylovSchur KrySchur (DLinOp, FGrid, 1e-8, RF);         // use D_{dwf}
+  // KrylovSchur KrySchur (PVdagM, FGrid, 1e-8, RF);      // use preconditioned PV^\dag D_{dwf}
+  // KrylovSchur KrySchur (DLinOp, FGrid, 1e-8, RF);         // use Dwilson
+  KrylovSchur KrySchur (DLinOp, UGrid, 1e-8, RF);         // use Dwilson
   KrySchur(src, maxIter, Nm, Nk, Nstop);
 
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
