@@ -69,6 +69,17 @@ class Arnoldi {
 
   public:       
 
+    // Restart diagnostics. All off by default and free when off; the output is parsed by
+    // analyse_arnoldi_diag.py. They exist to test whether the exact-shift QR sweeps in
+    // implicitRestart() destroy the Hessenberg structure that the truncation below assumes.
+    bool doEvalCheck = false;     // explicit || D v - theta v || for each returned eigenvector
+    bool doRestartDiag = false;   // per-shift QR pivot and Hessenberg fill, and the norm of the
+                                  // block that the truncation discards
+    int dumpEvery = 0;            // if > 0, dump Hess, evals and Ritz estimates every N restarts
+    RealD shiftPerturb = 0.0;     // if != 0, displace every shift by this * approxLambdaMax.
+                                  // Control: breaks the exact-shift singularity deliberately,
+                                  // without touching the QR itself.
+
     Arnoldi(LinearOperatorBase<Field> &_Linop, GridBase *_Grid, RealD _Tolerance, RitzFilter filter = EvalReSmall)
       : Linop(_Linop), Grid(_Grid), Tolerance(_Tolerance), ritzFilter(filter), f(_Grid), MaxIter(-1), Nm(-1), Nk(-1), 
           Nstop (-1), evals (0), evecs (), ssq (0.0), rtol (0.0), beta_k (0.0), approxLambdaMax (0.0), matvecs (0)
@@ -129,6 +140,8 @@ class Arnoldi {
         std::cout << GridLogMessage << "Ritz values after sorting (first Nk preserved): " << std::endl << evals << std::endl;
         // SU(N)::tepidConfiguration
 
+        if (dumpEvery > 0 && (i % dumpEvery == 0)) dumpFactorization(i);
+
         // Implicit restart to de-weight unwanted eigenvalues
         implicitRestart(_Nm, _Nk);      // probably can delete _Nm and _Nk from function args
         start = Nk;
@@ -153,6 +166,26 @@ class Arnoldi {
           // Nstop entries of evecs/evals are the answer as-is.
           // basisRotate(evecs, Qt, 0, Nk, 0, Nk, Nm);
           std::cout << GridLogMessage << "Eigenvalues [first " << Nconv << " converged]: " << std::endl << evals << std::endl;
+
+          // Explicit residuals, as KrylovSchur::checkConvergedAndReport does. The Ritz estimate
+          // beta_k |e_m^T s| is the true residual only for a valid Arnoldi factorization, so
+          // this is the check on whether the reported convergence is real.
+          if (doEvalCheck) {
+            Field w (Grid);
+            ComplexD coeff;
+            for (int k = 0; k < (int)evecs.size(); k++) {
+              RealD nv2 = norm2(evecs[k]);
+              Linop.Op(evecs[k], w);
+              coeff = innerProduct(evecs[k], w) / nv2;       // Rayleigh quotient, evecs unnormalized
+              w -= coeff * evecs[k];
+              std::cout << GridLogMessage << "ArnoldiDiag evec " << k
+                        << " eval_reported " << evals[k]
+                        << " eval_est " << coeff
+                        << " explicit_residual " << std::sqrt(norm2(w) / nv2)
+                        << " ritz_estimate " << beta_k * abs(littleEvecs(Nm - 1, k))
+                        << std::endl;
+            }
+          }
           return;
         }
       }      
@@ -406,10 +439,29 @@ class Arnoldi {
         std::cout << GridLogDebug << "Hess before rotation: " << Hess << std::endl;
 
         // QR factorize 
-        Eigen::HouseholderQR<Eigen::MatrixXcd> QR (Hess - evals[i] * Eigen::MatrixXcd::Identity(Nm, Nm));
+        // An exact shift makes (Hess - mu I) singular, so its trailing R diagonal collapses and
+        // the last Householder reflector is determined by rounding. shiftPerturb displaces the
+        // shift to test exactly that.
+        std::complex<double> shiftVal = evals[i];
+        if (shiftPerturb != 0.0) shiftVal += shiftPerturb * approxLambdaMax;
+        Eigen::HouseholderQR<Eigen::MatrixXcd> QR (Hess - shiftVal * Eigen::MatrixXcd::Identity(Nm, Nm));
         Qi = QR.householderQ();
         Q = Q * Qi;
         Hess = Qi.adjoint() * Hess * Qi;
+
+        if (doRestartDiag) {
+          // max |Hess(r,c)| over r > c+1: zero for a Hessenberg matrix, and the truncation
+          // below is only valid while it stays at round-off.
+          RealD fill = 0.0;
+          for (int c = 0; c < Nm; c++)
+            for (int r = c + 2; r < Nm; r++)
+              fill = std::max(fill, std::abs(Hess(r, c)));
+          std::cout << GridLogMessage << "ArnoldiDiag shift " << i
+                    << " eval " << evals[i]
+                    << " ritz_estimate " << beta_k * abs(littleEvecs(Nm - 1, i))
+                    << " pivot " << std::abs(QR.matrixQR()(Nm - 1, Nm - 1))
+                    << " maxfill " << fill << std::endl;
+        }
 
         std::cout << GridLogDebug << "Qt up to i = " << Q.transpose() << std::endl;
 
@@ -446,6 +498,18 @@ class Arnoldi {
       // (sorted) evecs from compute_eigensystem are already the answer.
       // basisRotate(evecs, Qt, 0, Nk + 1, 0, Nm, Nm);
 
+      if (doRestartDiag) {
+        // Slicing Hess to its leading Nk x Nk block silently discards Hess(Nk:Nm, 0:Nk).
+        // That is legitimate only for Hess(Nk, Nk-1), which carries the restarted residual;
+        // everything else in the block must be zero. This is that assumption, measured.
+        RealD drop = 0.0;
+        for (int c = 0; c < Nk; c++)
+          for (int r = Nk; r < Nm; r++)
+            if (!(r == Nk && c == Nk - 1)) drop += std::norm(Hess(r, c));
+        std::cout << GridLogMessage << "ArnoldiDiag restart discarded_norm " << std::sqrt(drop)
+                  << " subdiag " << std::abs(Hess(Nk, Nk - 1)) << std::endl;
+      }
+
       // Truncate the basis and restart
       basis = std::vector<Field> (basis.begin(), basis.begin() + Nk);
       // evecs = std::vector<Field> (evecs.begin(), evecs.begin() + Nk);
@@ -460,6 +524,33 @@ class Arnoldi {
 
     }
   
+    /**
+     * Dumps the pre-restart factorization -- Hessenberg matrix, sorted Ritz values and Ritz
+     * estimates -- to the log, so the restart can be replayed offline instead of rerunning.
+     * Grid filters logging to the boss rank, so this writes once per restart, not once per rank.
+     *
+     * Parameters
+     * ----------
+     * int it
+     *  Restart index, for labelling.
+     */
+    void dumpFactorization(int it) {
+      std::cout << GridLogMessage << "ArnoldiDump begin " << it
+                << " Nm " << Nm << " Nk " << Nk << " beta_k " << beta_k
+                << " rtol " << rtol << std::endl;
+      for (int k = 0; k < Nm; k++)
+        std::cout << GridLogMessage << "ArnoldiDump eval " << k
+                  << " " << evals[k].real() << " " << evals[k].imag()
+                  << " " << beta_k * abs(littleEvecs(Nm - 1, k)) << std::endl;
+      for (int r = 0; r < Nm; r++) {
+        std::cout << GridLogMessage << "ArnoldiDump hess " << r;
+        for (int c = 0; c < Nm; c++)
+          std::cout << " " << Hess(r, c).real() << " " << Hess(r, c).imag();
+        std::cout << std::endl;
+      }
+      std::cout << GridLogMessage << "ArnoldiDump end " << it << std::endl;
+    }
+
     /**
      * Computes the number of Arnoldi eigenvectors that have converged. An eigenvector s is considered converged 
      * for a tolerance epsilon if 

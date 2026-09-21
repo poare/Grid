@@ -115,8 +115,10 @@ inline std::string rfToString(RitzFilter RF) {
 struct ComplexComparator
 {
   RitzFilter RF;
-  ComplexComparator (RitzFilter _rf) : RF(_rf) {}
+  std::complex<double> shift;           // filter is applied to z - shift (harmonic shift, 0 otherwise)
+  ComplexComparator (RitzFilter _rf, std::complex<double> _shift = 0.0) : RF(_rf), shift(_shift) {}
   bool operator()(std::complex<double> z1, std::complex<double> z2) { 
+    z1 -= shift; z2 -= shift;
 	  RealD tmp1=std::abs(std::imag(z1));
 	  RealD tmp2=std::abs(std::imag(z2));
 	  if ( std::abs(std::real(z1)) >2.) tmp1 += 100.;
@@ -182,7 +184,8 @@ class ComplexSchurDecomposition {
      * If the input matrix _A is in Hessenberg form (upper triangular + first subdiagonal non-zero), then the Schur 
      * decomposition is easier to compute. 
      */
-    ComplexSchurDecomposition(CMat _A, bool isHess, RitzFilter ritzFilter = EvalReSmall) : A(_A), Nm (_A.rows()), cCompare (ritzFilter)
+    ComplexSchurDecomposition(CMat _A, bool isHess, RitzFilter ritzFilter = EvalReSmall, std::complex<double> shift = 0.0)
+      : A(_A), Nm (_A.rows()), cCompare (ritzFilter, shift)
     {
       Eigen::ComplexSchur<CMat> schur (Nm);
       if (isHess) {
@@ -349,6 +352,7 @@ class KrylovSchur {
     Eigen::MatrixXcd   littleEvecs;         // Nm x Nm evecs matrix
 
     RitzFilter ritzFilter;                  // how to sort evals
+    std::complex<double> sortShift = 0.0;   // ritzFilter is applied to (eval - sortShift); harmonic shift, else 0
 
     int matvecs;                            // matvecs performed during run
 
@@ -388,6 +392,7 @@ class KrylovSchur {
       Nm = _Nm; Nk = _Nk;
       Nstop = _Nstop;
       matvecs = 0;
+      sortShift = 0.0;
 
       ssq = norm2(v0);
       RealD approxLambdaMax = approxMaxEval(v0);
@@ -456,17 +461,19 @@ class KrylovSchur {
 
     /**
      * Runs the harmonic (shifted) Krylov-Schur loop: extracts Ritz values of a
-     * shift-augmented Rayleigh quotient so that eigenvalues near `*_shift` are
-     * reordered to the top instead of the extremal ones.
+     * shift-augmented Rayleigh quotient. The ritzFilter is applied to (theta - *_shift),
+     * so EvalNormSmall keeps the harmonic Ritz values nearest the shift.
      */
-    void operator()(const Field& v0, int _maxIter, int _Nm, int _Nk, int _Nstop, RealD *_shift, bool doubleOrthog = true) {
+    void operator()(const Field& v0, int _maxIter, int _Nm, int _Nk, int _Nstop, ComplexD *_shift, bool doubleOrthog = true) {
 
       assert(_shift && "harmonic KrylovSchur: shift must be non-null");
-      RealD shiftVal = *_shift;
+      std::complex<double> shiftVal = toStdCmplx(*_shift);
+      sortShift = shiftVal;
 
       MaxIter = _maxIter;
       Nm = _Nm; Nk = _Nk;
       Nstop = _Nstop;
+      matvecs = 0;
 
       ssq = norm2(v0);
       RealD approxLambdaMax = approxMaxEval(v0);
@@ -494,9 +501,7 @@ class KrylovSchur {
         //     top, then rotate and truncate as in the non-harmonic case.
         Eigen::MatrixXcd temp = Rayleigh;
         for (int m=0;m<Nm;m++) temp(m,m) -= shiftVal;
-        Eigen::MatrixXcd RayleighS = temp.inverse(); // (B-tI)^-1
-        Eigen::MatrixXcd temp2 = RayleighS.adjoint(); //(B-tI)^-1*
-        Eigen::VectorXcd g  = temp2*b; //g = (B-tI)^-1* * b
+        Eigen::VectorXcd g = temp.adjoint().partialPivLu().solve(b);   // g = (B-tI)^{-dag} b, by LU rather than explicit inverse
         Eigen::MatrixXcd Btilde = Rayleigh + g*(b.adjoint());
 
         Field utilde(Grid);
@@ -505,7 +510,7 @@ class KrylovSchur {
           utilde -= basis[j]*g(j);
         }
 
-        ComplexSchurDecomposition schurS (Btilde, false, ritzFilter);
+        ComplexSchurDecomposition schurS (Btilde, false, ritzFilter, sortShift);
         std::cout << GridLogMessage << "Shifted Schur eigenvalues shift = "<<shiftVal  << std::endl;
         schurS.schurReorder(Nk);
 
@@ -710,7 +715,7 @@ class KrylovSchur {
       // Sort eigenvalues/evecs to match the schurReorder ordering.
       int n = es.eigenvalues().size();
       std::cout << GridLogMessage << "n: " << n << std::endl;
-      ComplexComparator cComp(ritzFilter);
+      ComplexComparator cComp(ritzFilter, sortShift);
       std::vector<int> idx(n);
       std::iota(idx.begin(), idx.end(), 0);
       std::sort(idx.begin(), idx.end(), [&](int a, int b){

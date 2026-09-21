@@ -387,7 +387,7 @@ int main (int argc, char ** argv)
   // RealD shift = 1.0;
   // RealD shift = 0.95;    // this converges
   // RealD shift = 1.15;    // no converging
-  RealD shift = 1.8;
+  ComplexD shift(1.8, 0.0);
 
   int NmW = 48;         // total Krylov basis size
   int NkW = 12;         // basis vectors kept at each restart
@@ -407,6 +407,7 @@ int main (int argc, char ** argv)
     std::cout << GridLogMessage << "Running KrylovSchur on Dw with shift " << shift << std::endl;
     // KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
     KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalNormSmall);
+    KS.doEvalCheck = true;      // explicit ||D v - theta v|| for each reported pair at convergence
     KS(src4, maxIterW, NmW, NkW, NstopW, &shift, true);
     std::cout << GridLogMessage << "KrylovSchur Wilson eigenvalues (shift " << shift << "): " << std::endl << KS.getEvals() << std::endl;
   //  allEvals.push_back(KS.getEvals());
