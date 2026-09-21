@@ -79,6 +79,9 @@ class Arnoldi {
     RealD shiftPerturb = 0.0;     // if != 0, displace every shift by this * approxLambdaMax.
                                   // Control: breaks the exact-shift singularity deliberately,
                                   // without touching the QR itself.
+    bool useGivensRestart = true; // apply each shift with Hessenberg-preserving Givens rotations
+                                  // (shiftedQRStepGivens). Set false for the old dense
+                                  // HouseholderQR path, kept only for A/B comparison.
 
     Arnoldi(LinearOperatorBase<Field> &_Linop, GridBase *_Grid, RealD _Tolerance, RitzFilter filter = EvalReSmall)
       : Linop(_Linop), Grid(_Grid), Tolerance(_Tolerance), ritzFilter(filter), f(_Grid), MaxIter(-1), Nm(-1), Nk(-1), 
@@ -411,6 +414,57 @@ class Arnoldi {
     std::vector<Field>  getEvecs()          { return evecs; }
 
     /**
+     * One explicit shifted QR step, Hess <- R Q + mu I, with Q built from Givens rotations so
+     * that the Hessenberg structure is preserved exactly. Same bulge chase as
+     * ImplicitlyRestartedLanczos::QR_decomp performs on the tridiagonal Lanczos matrix, written
+     * here for a complex Hessenberg matrix.
+     *
+     * Replaces a dense Eigen::HouseholderQR of (Hess - mu I). That factorization is backward
+     * stable, but when mu is an exact Ritz value the matrix is singular and its last reflector
+     * is determined by rounding: the Q it returns is not the Hessenberg-preserving one, fill
+     * appears below the subdiagonal, and the leading-block truncation in implicitRestart then
+     * silently discards coupling it assumes to be zero.
+     * 
+     * Parameters
+     * ----------
+     * std::complex<double> mu
+     *  The shift.
+     * Eigen::MatrixXcd& Qacc
+     *  Accumulated basis rotation; this step's Q is multiplied onto its right.
+     * RealD& pivot
+     *  Out: |R(Nm-1, Nm-1)|, a measure of how singular (Hess - mu I) was.
+     */
+    void shiftedQRStepGivens(std::complex<double> mu, Eigen::MatrixXcd& Qacc, RealD& pivot) {
+
+      const int n = Nm;
+      Eigen::MatrixXcd X = Hess - mu * Eigen::MatrixXcd::Identity(n, n);
+      std::vector<Eigen::Matrix2cd> G (n - 1, Eigen::Matrix2cd::Identity());
+
+      // Left sweep: X -> R, zeroing one subdiagonal entry at a time.
+      for (int i = 0; i < n - 1; i++) {
+        std::complex<double> a = X(i, i);
+        std::complex<double> b = X(i + 1, i);
+        RealD r = std::hypot(std::abs(a), std::abs(b));
+        if (r > 0.0) {
+          std::complex<double> c = std::conj(a) / r;
+          std::complex<double> s = std::conj(b) / r;
+          G[i] << c, s, -std::conj(s), std::conj(c);
+          X.block(i, i, 2, n - i) = (G[i] * X.block(i, i, 2, n - i)).eval();
+        }
+      }
+      pivot = std::abs(X(n - 1, n - 1));
+
+      // Right sweep: R -> R Q, accumulating Q into Qacc. Ascending order matters -- each
+      // multiplication sees the columns the previous one updated.
+      for (int i = 0; i < n - 1; i++) {
+        X.block(0, i, n, 2)    = (X.block(0, i, n, 2)    * G[i].adjoint()).eval();
+        Qacc.block(0, i, n, 2) = (Qacc.block(0, i, n, 2) * G[i].adjoint()).eval();
+      }
+
+      Hess = X + mu * Eigen::MatrixXcd::Identity(n, n);
+    }
+
+    /**
      * Implements implicit restarting for Arnoldi. Assumes eigenvalues are sorted. 
      * 
      * Parameters
@@ -439,15 +493,24 @@ class Arnoldi {
         std::cout << GridLogDebug << "Hess before rotation: " << Hess << std::endl;
 
         // QR factorize 
-        // An exact shift makes (Hess - mu I) singular, so its trailing R diagonal collapses and
-        // the last Householder reflector is determined by rounding. shiftPerturb displaces the
-        // shift to test exactly that.
+        // An exact shift makes (Hess - mu I) singular, so its trailing R diagonal collapses.
+        // A dense HouseholderQR then builds its last reflector from rounding noise and does not
+        // return the Hessenberg-preserving Q, which breaks the truncation below; Givens
+        // rotations preserve the structure by construction. shiftPerturb displaces the shift
+        // instead, as a control on the singularity itself.
         std::complex<double> shiftVal = evals[i];
         if (shiftPerturb != 0.0) shiftVal += shiftPerturb * approxLambdaMax;
-        Eigen::HouseholderQR<Eigen::MatrixXcd> QR (Hess - shiftVal * Eigen::MatrixXcd::Identity(Nm, Nm));
-        Qi = QR.householderQ();
-        Q = Q * Qi;
-        Hess = Qi.adjoint() * Hess * Qi;
+
+        RealD pivot;
+        if (useGivensRestart) {
+          shiftedQRStepGivens(shiftVal, Q, pivot);
+        } else {
+          Eigen::HouseholderQR<Eigen::MatrixXcd> QR (Hess - shiftVal * Eigen::MatrixXcd::Identity(Nm, Nm));
+          Qi = QR.householderQ();
+          Q = Q * Qi;
+          Hess = Qi.adjoint() * Hess * Qi;
+          pivot = std::abs(QR.matrixQR()(Nm - 1, Nm - 1));
+        }
 
         if (doRestartDiag) {
           // max |Hess(r,c)| over r > c+1: zero for a Hessenberg matrix, and the truncation
@@ -459,7 +522,7 @@ class Arnoldi {
           std::cout << GridLogMessage << "ArnoldiDiag shift " << i
                     << " eval " << evals[i]
                     << " ritz_estimate " << beta_k * abs(littleEvecs(Nm - 1, i))
-                    << " pivot " << std::abs(QR.matrixQR()(Nm - 1, Nm - 1))
+                    << " pivot " << pivot
                     << " maxfill " << fill << std::endl;
         }
 
