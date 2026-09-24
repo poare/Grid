@@ -387,13 +387,23 @@ int main (int argc, char ** argv)
   int NstopW = 28;       // stop once NstopW eigenvalues have converged
   int maxIterW = 10000;  // generous restart budget; both solvers return early on convergence
 
-  std::cout << GridLogMessage << "Running KrylovSchur on Dw" << std::endl;
-  KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
-  KS(src4, maxIterW, NmW, NkW, NstopW);
+  // std::cout << GridLogMessage << "Running Arnoldi on Dw" << std::endl;
+  // Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
+  // ArnW(src4, maxIterW, NmW, NkW, NstopW, true);   // doubleOrthog on, matching the KrylovSchur default
 
   std::cout << GridLogMessage << "Running Arnoldi on Dw" << std::endl;
   Arnoldi<LatticeFermionD> ArnW (DwLinOp, UGrid, 1e-8, EvalReSmall);
+  ArnW.doRestartDiag = true;    // per-shift pivot + fill, and the discarded-block norm
+  ArnW.doEvalCheck   = true;    // explicit residuals for the returned eigenvectors
+  ArnW.dumpEvery     = 50;      // Hess + evals + estimates every 50 restarts
+  // ArnW.shiftPerturb = 1e-6;  // Run 2 control only -- leave off for the baseline
   ArnW(src4, maxIterW, NmW, NkW, NstopW, true);   // doubleOrthog on, matching the KrylovSchur default
+
+  
+  std::cout << GridLogMessage << "Running KrylovSchur on Dw" << std::endl;
+  KrylovSchur<LatticeFermionD> KS (DwLinOp, UGrid, 1e-8, EvalReSmall);
+  KS(src4, maxIterW, NmW, NkW, NstopW);
+  KS.doEvalCheck = true;
 
   std::cout<<GridLogMessage << "*******************************************" << std::endl;
   std::cout<<GridLogMessage << "***** WILSON RESULTS (m = 0.01) ***********" << std::endl;
