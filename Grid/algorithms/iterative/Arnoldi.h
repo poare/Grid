@@ -80,7 +80,7 @@ class Arnoldi {
                                   // Control: breaks the exact-shift singularity deliberately,
                                   // without touching the QR itself.
     bool useGivensRestart = true; // apply each shift with Hessenberg-preserving Givens rotations
-                                  // (shiftedQRStepGivens). Set false for the old dense
+                                  // (QR_decomp). Set false for the old dense
                                   // HouseholderQR path, kept only for A/B comparison.
 
     Arnoldi(LinearOperatorBase<Field> &_Linop, GridBase *_Grid, RealD _Tolerance, RitzFilter filter = EvalReSmall)
@@ -414,54 +414,74 @@ class Arnoldi {
     std::vector<Field>  getEvecs()          { return evecs; }
 
     /**
-     * One explicit shifted QR step, Hess <- R Q + mu I, with Q built from Givens rotations so
-     * that the Hessenberg structure is preserved exactly. Same bulge chase as
-     * ImplicitlyRestartedLanczos::QR_decomp performs on the tridiagonal Lanczos matrix, written
-     * here for a complex Hessenberg matrix.
+     * One explicit shifted QR step on a complex upper Hessenberg matrix:
      *
-     * Replaces a dense Eigen::HouseholderQR of (Hess - mu I). That factorization is backward
-     * stable, but when mu is an exact Ritz value the matrix is singular and its last reflector
+     *     H - Dsh I = Q R,   H <- R Q + Dsh I,   Qt <- Qt Q
+     *
+     * Q is assembled from Givens rotations, one per subdiagonal entry, so the Hessenberg
+     * structure is preserved exactly: entries below the subdiagonal are never touched and stay
+     * bitwise zero. Same role as ImplicitlyRestartedLanczos::QR_decomp, which chases a bulge
+     * down the real symmetric tridiagonal Lanczos matrix; here the matrix is complex and
+     * carries a full upper triangle, so it is passed whole rather than as a diagonal /
+     * sub-diagonal pair.
+     *
+     * Explicit rather than an implicit bulge chase: at O(Nm^2) per shift the two cost the same
+     * on a matrix this size, and the implicit form driven by an exact shift is the construction
+     * whose forward instability Parlett and Le analysed.
+     *
+     * Replaces a dense Eigen::HouseholderQR of (H - Dsh I). That factorization is backward
+     * stable, but when Dsh is an exact Ritz value the matrix is singular and its last reflector
      * is determined by rounding: the Q it returns is not the Hessenberg-preserving one, fill
      * appears below the subdiagonal, and the leading-block truncation in implicitRestart then
      * silently discards coupling it assumes to be zero.
-     * 
+     *
      * Parameters
      * ----------
-     * std::complex<double> mu
-     *  The shift.
-     * Eigen::MatrixXcd& Qacc
+     * Eigen::MatrixXcd& H
+     *  Nm x Nm upper Hessenberg matrix, overwritten in place with R Q + Dsh I.
+     * int Nm
+     *  Dimension of H and Qt.
+     * Eigen::MatrixXcd& Qt
      *  Accumulated basis rotation; this step's Q is multiplied onto its right.
+     * std::complex<double> Dsh
+     *  The shift.
+     * int kmin, int kmax
+     *  Half-open active window: rotations annihilate H(k+1,k) for kmin <= k < kmax-1. Pass
+     *  (0, Nm) for the whole matrix. A nonzero kmin leaves the leading block untouched, which
+     *  is what locking a converged block would need; that path is not yet exercised.
      * RealD& pivot
-     *  Out: |R(Nm-1, Nm-1)|, a measure of how singular (Hess - mu I) was.
+     *  Out: |R(kmax-1, kmax-1)|, how singular (H - Dsh I) was inside the window.
      */
-    void shiftedQRStepGivens(std::complex<double> mu, Eigen::MatrixXcd& Qacc, RealD& pivot) {
+    void QR_decomp(Eigen::MatrixXcd& H, int Nm,
+                   Eigen::MatrixXcd& Qt, std::complex<double> Dsh,
+                   int kmin, int kmax, RealD& pivot)
+    {
+      std::vector<Eigen::Matrix2cd> G (kmax - 1, Eigen::Matrix2cd::Identity());
 
-      const int n = Nm;
-      Eigen::MatrixXcd X = Hess - mu * Eigen::MatrixXcd::Identity(n, n);
-      std::vector<Eigen::Matrix2cd> G (n - 1, Eigen::Matrix2cd::Identity());
+      for (int k = kmin; k < kmax; k++) H(k, k) -= Dsh;
 
-      // Left sweep: X -> R, zeroing one subdiagonal entry at a time.
-      for (int i = 0; i < n - 1; i++) {
-        std::complex<double> a = X(i, i);
-        std::complex<double> b = X(i + 1, i);
+      // Left sweep: H -> R, annihilating one subdiagonal entry at a time.
+      for (int k = kmin; k < kmax - 1; k++) {
+        std::complex<double> a = H(k, k);
+        std::complex<double> b = H(k + 1, k);
         RealD r = std::hypot(std::abs(a), std::abs(b));
         if (r > 0.0) {
           std::complex<double> c = std::conj(a) / r;
           std::complex<double> s = std::conj(b) / r;
-          G[i] << c, s, -std::conj(s), std::conj(c);
-          X.block(i, i, 2, n - i) = (G[i] * X.block(i, i, 2, n - i)).eval();
+          G[k] << c, s, -std::conj(s), std::conj(c);
+          H.block(k, k, 2, Nm - k) = (G[k] * H.block(k, k, 2, Nm - k)).eval();
         }
       }
-      pivot = std::abs(X(n - 1, n - 1));
+      pivot = std::abs(H(kmax - 1, kmax - 1));
 
-      // Right sweep: R -> R Q, accumulating Q into Qacc. Ascending order matters -- each
-      // multiplication sees the columns the previous one updated.
-      for (int i = 0; i < n - 1; i++) {
-        X.block(0, i, n, 2)    = (X.block(0, i, n, 2)    * G[i].adjoint()).eval();
-        Qacc.block(0, i, n, 2) = (Qacc.block(0, i, n, 2) * G[i].adjoint()).eval();
+      // Right sweep: R -> R Q, same rotations in the same order, accumulated into Qt. Ascending
+      // order matters -- each multiplication sees the columns the previous one updated.
+      for (int k = kmin; k < kmax - 1; k++) {
+        H.block (0, k, kmax, 2) = (H.block (0, k, kmax, 2) * G[k].adjoint()).eval();
+        Qt.block(0, k, Nm,   2) = (Qt.block(0, k, Nm,   2) * G[k].adjoint()).eval();
       }
 
-      Hess = X + mu * Eigen::MatrixXcd::Identity(n, n);
+      for (int k = kmin; k < kmax; k++) H(k, k) += Dsh;
     }
 
     /**
@@ -503,7 +523,7 @@ class Arnoldi {
 
         RealD pivot;
         if (useGivensRestart) {
-          shiftedQRStepGivens(shiftVal, Q, pivot);
+          QR_decomp(Hess, Nm, Q, shiftVal, 0, Nm, pivot);
         } else {
           Eigen::HouseholderQR<Eigen::MatrixXcd> QR (Hess - shiftVal * Eigen::MatrixXcd::Identity(Nm, Nm));
           Qi = QR.householderQ();
