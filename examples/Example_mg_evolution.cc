@@ -366,7 +366,7 @@ int main (int argc, char ** argv)
   }
   std::cout<<GridLogMessage<<"Reading configuration "<<config<<std::endl;
 
-  const int nbasis = 4;            // near-null vectors (40 in Example_pvdagm_svd.cc; reduced for local running)
+  const int nbasis = 40;           // near-null vectors, as in Example_pvdagm_svd.cc
   const int cb     = 0;
 
   int   Ntraj   = 50;              // number of HMC trajectories to generate
