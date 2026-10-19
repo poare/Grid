@@ -369,7 +369,7 @@ int main (int argc, char ** argv)
   const int nbasis = 40;           // near-null vectors, as in Example_pvdagm_svd.cc
   const int cb     = 0;
 
-  int   Ntraj   = 50;              // number of HMC trajectories to generate
+  int   Ntraj   = 40;              // number of HMC trajectories to generate (~28 min each on 8 nodes at nbasis=40)
   RealD beta    = 2.13;            // Iwasaki coupling for the (quenched) evolution
   int   MDsteps = 20;              // MD steps per trajectory
   RealD trajL   = 1.0;             // trajectory length
@@ -490,8 +490,6 @@ int main (int argc, char ** argv)
   AggregatesRefined.subspace = AggregatesFrozen.subspace;   // start from the same basis
 
   LittleDiracOperator LittleDiracOpFrozen     (geom,FGrid,Coarse5d); // built at U_0, never rebuilt
-  LittleDiracOperator LittleDiracOpRecoarsened(geom,FGrid,Coarse5d); // rebuilt every trajectory, frozen basis
-  LittleDiracOperator LittleDiracOpRefined    (geom,FGrid,Coarse5d); // rebuilt every trajectory, refined basis
 
   RealD t0_coarsen = -usecond();
   LittleDiracOpFrozen.CoarsenOperator(PVdagM0,AggregatesFrozen);
@@ -547,14 +545,16 @@ int main (int argc, char ** argv)
   for(int traj=1;traj<=Ntraj;traj++){
 
     ////////////////////////////////////////////////////////////////////////
-    // One HMC trajectory: momentum refresh, MD integration, Metropolis.
-    // On rejection Umu is left unchanged (a genuine HMC step).
+    // One MD trajectory: momentum refresh and MD integration, always
+    // accepted (no Metropolis test), so U moves every trajectory. Not a
+    // valid Markov chain -- configurations are for this experiment only.
     ////////////////////////////////////////////////////////////////////////
     HMCparameters HMCpar;
     HMCpar.StartTrajectory   = traj;
     HMCpar.Trajectories      = 1;
     HMCpar.NoMetropolisUntil = 0;
-    HMCpar.MetropolisTest    = true;
+    HMCpar.MetropolisTest    = false;  // always accept: only the smooth flow of U matters here
+                                       // (dH ~ 4-5 at MDsteps=20 rejected every trajectory, job 424245)
     HMCpar.PerformRandomShift= false;
 
     RealD t_hmc = -usecond();
@@ -595,6 +595,10 @@ int main (int argc, char ** argv)
     ////////////////////////////////////////////////////////////////////////
     // (b) RECOARSEN: stale subspace, coarse operator recomputed at U_t
     ////////////////////////////////////////////////////////////////////////
+    // GeneralCoarsenedMatrix is single-use: CoarsenOperator leaves _A on the
+    // padded grid, so a second call on the same object fails conformable().
+    // Build the (b) and (c) operators afresh every trajectory.
+    LittleDiracOperator LittleDiracOpRecoarsened(geom,FGrid,Coarse5d);
     RealD t_coarsenB = -usecond();
     LittleDiracOpRecoarsened.CoarsenOperator(PVdagM,AggregatesFrozen);
     t_coarsenB = (t_coarsenB+usecond())/1.0e6;
@@ -610,6 +614,7 @@ int main (int argc, char ** argv)
     RefineSubspaceGCR(AggregatesRefined,PVdagM,nbasis,refineTol,refineMaxOuter);
     t_refineC = (t_refineC+usecond())/1.0e6;
 
+    LittleDiracOperator LittleDiracOpRefined(geom,FGrid,Coarse5d);
     RealD t_coarsenC = -usecond();
     LittleDiracOpRefined.CoarsenOperator(PVdagM,AggregatesRefined);
     t_coarsenC = (t_coarsenC+usecond())/1.0e6;
