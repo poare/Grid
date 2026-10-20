@@ -665,7 +665,7 @@ int main (int argc, char ** argv)
   RealD t0_setup = BreedBasis(AggregatesFrozen,PVdagM0,seedsB);
   std::vector<LatticeFermion> S0         = AggregatesFrozen.subspace;
   std::vector<LatticeFermion> SfreshPrev = S0;
-  AggregatesRefined.subspace = S0;
+  std::vector<LatticeFermion> SrefinedPrev = S0;   // refined basis as refined, never block-orthonormalised
 
   // Reproducibility check: re-breeding at U_0 from the same noise should
   // give theta ~ 0. Anything larger is the floor for every angle below.
@@ -801,10 +801,16 @@ int main (int argc, char ** argv)
     RealD t_fresh = BreedBasis(AggregatesFresh,PVdagM,seedsB);
     std::vector<LatticeFermion> Sfresh = AggregatesFresh.subspace;
 
+    // Seed the refresh from the previous refined basis AS REFINED. Seeding from
+    // AggregatesRefined after coarsening (block-orthonormalised, so cut at
+    // block boundaries) made rung (c) drift away from S_t^fresh faster than
+    // the frozen basis did (job 424665: capture 0.9997 -> 0.75 over 10 traj).
+    AggregatesRefined.subspace = SrefinedPrev;
     RealD t_refine = -usecond();
     RefineSubspaceGCR(AggregatesRefined,PVdagM,nbasis,refineTol,refineMaxOuter);
     t_refine = (t_refine+usecond())/1.0e6;
     std::vector<LatticeFermion> Srefined = AggregatesRefined.subspace;
+    SrefinedPrev = Srefined;
 
     TrajRecord rec;
     rec.traj = traj;
