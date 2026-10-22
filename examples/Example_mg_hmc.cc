@@ -73,6 +73,11 @@ int main (int argc, char ** argv)
   RealD epsCorr      = opt("--eps-corr")   ? std::stod(optS("--eps-corr"))   : 1.0e-2;
   int   forceSteps   = 1000;                   // outer-step cap, MG force solve
   int   corrSteps    = 50;                     // outer-step cap, correction solve
+  // Coarse solve inside every MG application: GCR(10,10). Defaults are those of
+  // Example_pvdagm_svd job 341271 on the same configuration.
+  RealD coarseTol    = opt("--coarse-tol")      ? std::stod(optS("--coarse-tol"))      : 3.0e-2;
+  int   coarseSteps  = opt("--coarse-maxsteps") ? std::stoi(optS("--coarse-maxsteps")) : 1000; // rounded up to a restart
+  int   recoarsenEvery = opt("--recoarsen-every") ? std::stoi(optS("--recoarsen-every")) : 0;  // 0 = only after an update
   int   gcrSteps     = opt("--gcr-maxsteps") ? std::stoi(optS("--gcr-maxsteps")) : 20000;
   int   freshEvery   = opt("--fresh-every")  ? std::stoi(optS("--fresh-every"))  : 0;   // 0 = end of each trajectory
   int   rebreedIters = opt("--rebreed-iters") ? std::stoi(optS("--rebreed-iters")) : 0; // 0 = off
@@ -83,7 +88,9 @@ int main (int argc, char ** argv)
 	   <<" beta "<<beta<<" solver "<<(useGCR ? "gcr" : "mg")<<" update_every "<<updateEvery
 	   <<" baseline_every "<<baselineEvery<<" correction "<<(form==CorrectionForm::Projected ? "projected" : "plain")
 	   <<" eps_force "<<epsForce<<" eps_corr "<<epsCorr<<" fresh_every "<<freshEvery
-	   <<" rebreed_iters "<<rebreedIters<<" reject_all "<<rejectAll<<std::endl;
+	   <<" rebreed_iters "<<rebreedIters<<" reject_all "<<rejectAll
+	   <<" coarse_tol "<<coarseTol<<" coarse_maxsteps "<<10*((coarseSteps+9)/10)
+	   <<" recoarsen_every "<<recoarsenEvery<<std::endl;
 
   //////////////////////////////////////////////////////////////////////////
   // Grids, RNGs, gauge field (same seeds as Example_mg_evolution.cc, so the
@@ -156,6 +163,7 @@ int main (int argc, char ** argv)
   std::vector<LatticeFermion> Vraw;
   std::unique_ptr<LittleDiracOperator> LDOp;
   std::unique_ptr<CoarseOp>            LinOpCoarse;
+  std::unique_ptr<CountingLinearOperator<CoarseVector>> CountedCoarse;
   std::unique_ptr<CoarseGCR>           L2PGCR;
   std::unique_ptr<FineGCR>             SmootherGCR;
   std::unique_ptr<TwoLevelMG>          MG;
@@ -164,15 +172,16 @@ int main (int argc, char ** argv)
     RealD t = -usecond();
     counter.Set("coarsen");
     Agg.subspace = Vraw;
-    MG.reset(); SmootherGCR.reset(); L2PGCR.reset(); LinOpCoarse.reset(); LDOp.reset();
+    MG.reset(); SmootherGCR.reset(); L2PGCR.reset(); CountedCoarse.reset(); LinOpCoarse.reset(); LDOp.reset();
     LDOp.reset(new LittleDiracOperator(geom,FGrid,Coarse5d));
     LDOp->CoarsenOperator(A,Agg);
     LinOpCoarse.reset(new CoarseOp(*LDOp));
-    L2PGCR.reset(new CoarseGCR(3.0e-2,100,*LinOpCoarse,simpleCoarse,10,10));
+    CountedCoarse.reset(new CountingLinearOperator<CoarseVector>(*LinOpCoarse,counter,true));
+    L2PGCR.reset(new CoarseGCR(coarseTol,(coarseSteps+9)/10,*CountedCoarse,simpleCoarse,10,10));
     L2PGCR->Level(3);
     SmootherGCR.reset(new FineGCR(0.01,1,Ashift,simpleFine,16,16));
     SmootherGCR->Level(2);
-    MG.reset(new TwoLevelMG(Agg,A,simpleFine,*SmootherGCR,*LinOpCoarse,*L2PGCR));
+    MG.reset(new TwoLevelMG(Agg,A,simpleFine,*SmootherGCR,*CountedCoarse,*L2PGCR));
     return (t+usecond())/1.0e6;
   };
 
@@ -218,11 +227,14 @@ int main (int argc, char ** argv)
   int nUpdates = 0;
 
   // One stand-in force solve at the current field; returns outer steps
+  RealD t_recoarsen = 0.0;  // seconds spent recoarsening before this step's solve
   auto ForceSolve = [&](int traj, int step) {
     GridParallelRNG RNGeta(FGrid); RNGeta.SeedFixedIntegers(std::vector<int>({21,22,23,globalStep}));
     gaussian(RNGeta,eta);
     counter.Set("force");
     uint64_t c0 = counter.Get("force");
+    uint64_t cc0 = counter.GetCoarse("force");
+    int calls0 = useGCR ? 0 : MG->calls;
     RealD t = -usecond();
     int iters;
     RealD tsm = 0, tco = 0;
@@ -241,11 +253,14 @@ int main (int argc, char ** argv)
     }
     t = (t+usecond())/1.0e6;
     uint64_t mv = counter.Get("force") - c0;
+    uint64_t cmv = counter.GetCoarse("force") - cc0;
+    int ccalls = useGCR ? 0 : MG->calls - calls0;
     counter.Set("measure");
     A.Op(x,r); r = eta - r;
     RealD relres = std::sqrt(norm2(r)/norm2(eta));
     std::cout<<GridLogMessage<<"MGHMC-STEP "<<traj<<" "<<step<<" "<<LinkDistance(U0,Umu)<<" "<<LinkDistance(Ulast,Umu)
-	     <<" "<<WilsonLoops<Gimpl>::avgPlaquette(Umu)<<" "<<iters<<" "<<mv<<" "<<t<<" "<<tsm<<" "<<tco<<" "<<relres<<std::endl;
+	     <<" "<<WilsonLoops<Gimpl>::avgPlaquette(Umu)<<" "<<iters<<" "<<mv<<" "<<t<<" "<<tsm<<" "<<tco<<" "<<relres
+	     <<" "<<cmv<<" "<<ccalls<<" "<<t_recoarsen<<std::endl;
     return iters;
   };
 
@@ -288,6 +303,10 @@ int main (int argc, char ** argv)
 
       bool solveNow = !useGCR || (globalStep % baselineEvery == 0);
       if (!solveNow) return;
+
+      // Galerkin coarse operator of A(U) from the unchanged basis; matvecs count as coarsen
+      t_recoarsen = 0.0;
+      if (!useGCR && recoarsenEvery > 0 && globalStep % recoarsenEvery == 0) t_recoarsen = Rebuild();
       int iters = ForceSolve(traj,step);
 
       if (useGCR) return;
@@ -304,7 +323,11 @@ int main (int argc, char ** argv)
 
       if (updateEvery > 0 && step % updateEvery == 0) {
         std::vector<LatticeFermion> Vprev = Vraw;
+        uint64_t cc0 = counter.GetCoarse("correct");
+        int calls0 = MG->calls;
         UpdateStats st = PerturbativeUpdate(Vraw,A,Alast,*MG,epsCorr,corrSteps,form,counter);
+        uint64_t cmv = counter.GetCoarse("correct") - cc0;
+        int ccalls = MG->calls - calls0;    // before Rebuild() replaces MG
         RealD t_coarsen = 0.0, dist2 = 0.0, gcond = NAN, cap0 = NAN;
         if (!st.skipped) {
           counter.Set("measure");
@@ -319,7 +342,8 @@ int main (int argc, char ** argv)
         std::cout<<GridLogMessage<<"MGHMC-UPDATE "<<traj<<" "<<step<<" skipped "<<st.skipped<<" capped "<<st.capped
 		 <<" matvecs "<<st.matvecs<<" seconds "<<st.seconds<<" coarsen_s "<<t_coarsen
 		 <<" resid_before "<<st.resid_before<<" resid_after "<<st.resid_after
-		 <<" cap_S0 "<<cap0<<" dist2_prev "<<dist2<<" gram_cond "<<gcond;
+		 <<" cap_S0 "<<cap0<<" dist2_prev "<<dist2<<" gram_cond "<<gcond
+		 <<" coarse_matvecs "<<cmv<<" coarse_calls "<<ccalls;
         std::cout<<" iters";  for (auto i : st.iters)  std::cout<<" "<<i;
         std::cout<<" wratio"; for (auto w : st.wratio) std::cout<<" "<<w;
         std::cout<<std::endl;
@@ -345,6 +369,7 @@ int main (int argc, char ** argv)
     std::cout<<GridLogMessage<<"MGHMC-TRAJ "<<traj<<" dH "<<dH<<" accepted "<<accepted<<" restored "<<restored
 	     <<" seconds "<<t_traj;
     for (auto &kv : counter.counts) std::cout<<" cum_"<<kv.first<<" "<<kv.second;
+    for (auto &kv : counter.coarse) std::cout<<" cum_coarse_"<<kv.first<<" "<<kv.second;
     std::cout<<std::endl;
   }
 

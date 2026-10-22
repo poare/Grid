@@ -33,49 +33,67 @@ NAMESPACE_BEGIN(Grid);
 /**
  * Counts applications of the fine operator, attributed to the category that
  * is current when the application happens (setup, coarsen, force, correct,
- * measure, ...). A HermOp is two applications.
+ * measure, ...). A HermOp is two applications. Applications of the coarse
+ * operator are kept apart, under the same categories, and never enter Total().
  */
 struct MatvecCounter {
   std::string category = "none";
   std::map<std::string, uint64_t> counts;
+  std::map<std::string, uint64_t> coarse;
 
   void Set(const std::string &c) { category = c; }
   void Add(uint64_t n) { counts[category] += n; }
+  void AddCoarse(uint64_t n) { coarse[category] += n; }
   uint64_t Get(const std::string &c) const {
     auto it = counts.find(c);
     return it == counts.end() ? 0 : it->second;
+  }
+  uint64_t GetCoarse(const std::string &c) const {
+    auto it = coarse.find(c);
+    return it == coarse.end() ? 0 : it->second;
   }
   uint64_t Total() const {
     uint64_t t = 0;
     for (auto &kv : counts) t += kv.second;
     return t;
   }
-  /** One grep-able line: <tag> <category> <count> ... total <n> */
+  uint64_t TotalCoarse() const {
+    uint64_t t = 0;
+    for (auto &kv : coarse) t += kv.second;
+    return t;
+  }
+  /** One grep-able line: <tag> <category> <count> ... total <n> coarse_<category> <count> ... coarse_total <n> */
   void Report(const std::string &tag) const {
     std::cout << GridLogMessage << tag;
     for (auto &kv : counts) std::cout << " " << kv.first << " " << kv.second;
-    std::cout << " total " << Total() << std::endl;
+    std::cout << " total " << Total();
+    for (auto &kv : coarse) std::cout << " coarse_" << kv.first << " " << kv.second;
+    std::cout << " coarse_total " << TotalCoarse() << std::endl;
   }
 };
 
 /**
  * Wraps a LinearOperatorBase and counts every application in a shared
  * MatvecCounter. Op and AdjOp count 1, HermOp and HermOpAndNorm count 2.
+ * With coarse = true the applications go to the counter's coarse tally.
  */
 template<class Field>
 class CountingLinearOperator : public LinearOperatorBase<Field> {
   LinearOperatorBase<Field> &_Op;
   MatvecCounter             &_Counter;
+  bool                       _Coarse;
+  void Count(uint64_t n) { if (_Coarse) _Counter.AddCoarse(n); else _Counter.Add(n); }
 public:
-  CountingLinearOperator(LinearOperatorBase<Field> &op, MatvecCounter &c) : _Op(op), _Counter(c) {};
+  CountingLinearOperator(LinearOperatorBase<Field> &op, MatvecCounter &c, bool coarse=false)
+    : _Op(op), _Counter(c), _Coarse(coarse) {};
 
   void OpDiag   (const Field &in, Field &out)                 { _Op.OpDiag(in,out); }
   void OpDir    (const Field &in, Field &out,int dir,int disp) { _Op.OpDir(in,out,dir,disp); }
   void OpDirAll (const Field &in, std::vector<Field> &out)    { _Op.OpDirAll(in,out); }
-  void Op       (const Field &in, Field &out)                 { _Counter.Add(1); _Op.Op(in,out); }
-  void AdjOp    (const Field &in, Field &out)                 { _Counter.Add(1); _Op.AdjOp(in,out); }
-  void HermOp   (const Field &in, Field &out)                 { _Counter.Add(2); _Op.HermOp(in,out); }
-  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2) { _Counter.Add(2); _Op.HermOpAndNorm(in,out,n1,n2); }
+  void Op       (const Field &in, Field &out)                 { Count(1); _Op.Op(in,out); }
+  void AdjOp    (const Field &in, Field &out)                 { Count(1); _Op.AdjOp(in,out); }
+  void HermOp   (const Field &in, Field &out)                 { Count(2); _Op.HermOp(in,out); }
+  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2) { Count(2); _Op.HermOpAndNorm(in,out,n1,n2); }
 };
 
 /**
