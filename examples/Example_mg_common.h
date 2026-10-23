@@ -207,9 +207,10 @@ public:
 // near-null space of the updated operator. The structure mirrors the inner
 // loop of Aggregation::CreateSubspaceGCR, but seeded with the old vector
 // instead of fresh noise, and with a much smaller iteration budget.
+// Returns the GCR steps taken for each vector.
 //////////////////////////////////////////////////////////////////////////////
 template<class Aggregates, class Field>
-void RefineSubspaceGCR(Aggregates &Agg,
+std::vector<int> RefineSubspaceGCR(Aggregates &Agg,
 		       LinearOperatorBase<Field> &DiracOp,
 		       int nn,
 		       RealD tol, int maxouter)
@@ -221,6 +222,7 @@ void RefineSubspaceGCR(Aggregates &Agg,
   Field src(Agg.FineGrid);
   Field guess(Agg.FineGrid);
   Field Mn(Agg.FineGrid);
+  std::vector<int> steps(nn);
 
   for(int b=0;b<nn;b++){
     scale = std::pow(norm2(Agg.subspace[b]),-0.5);
@@ -231,6 +233,7 @@ void RefineSubspaceGCR(Aggregates &Agg,
 
     guess = Zero();
     GCR(src,guess);
+    steps[b] = GCR.steps;
 
     scale = std::pow(norm2(guess),-0.5);
     Agg.subspace[b] = guess*scale;
@@ -238,6 +241,7 @@ void RefineSubspaceGCR(Aggregates &Agg,
     DiracOp.Op(Agg.subspace[b],Mn);
     std::cout<<GridLogMessage << "refine-out["<<b<<"] <v|Op|v> "<<innerProduct(Agg.subspace[b],Mn)<<std::endl;
   }
+  return steps;
 }
 
 //////////////////////////////////////////////////////////////////////////////

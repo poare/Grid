@@ -80,6 +80,13 @@ int main (int argc, char ** argv)
     CountedOp.Op(x,y);
     bool pass = counter.Get("a")==7 && counter.Get("b")==1 && counter.Total()==8;
     Check("counter",pass,(RealD)counter.Total());
+
+    // The coarse tally is separate and never enters Total()
+    CountingLinearOperator<LatticeFermion> CoarseCounted(PVdagM,counter,true);
+    CoarseCounted.Op(x,y);
+    CoarseCounted.HermOp(x,y);
+    pass = counter.GetCoarse("b")==3 && counter.TotalCoarse()==3 && counter.Total()==8;
+    Check("counter_coarse",pass,(RealD)counter.TotalCoarse());
   }
 
   //////////////////////////////////////////////////////////////////////////
