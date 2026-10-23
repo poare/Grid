@@ -415,4 +415,24 @@ RealD LinkDistance(LatticeGaugeField &U0, LatticeGaugeField &Ut)
   return 1.0 - s/(Nd*Nc*(RealD)U0.Grid()->gSites());
 }
 
+//////////////////////////////////////////////////////////////////////////////
+// Read one field written in SciDAC format (as the Krylov-Schur drivers write
+// their eigenvectors, evec0 ... evecN). Needs LIME.
+//////////////////////////////////////////////////////////////////////////////
+template<class Field>
+void ReadScidacField(Field &out, const std::string &fname)
+{
+#ifdef HAVE_LIME
+  std::cout<<GridLogMessage<<"Reads at: "<<fname<<std::endl;
+  emptyUserRecord record;
+  ScidacReader SR;
+  SR.open(fname);
+  SR.readScidacFieldRecord(out,record);
+  SR.close();
+#else
+  std::cout<<GridLogError<<"ReadScidacField: Grid built without LIME, cannot read "<<fname<<std::endl;
+  assert(0);
+#endif
+}
+
 NAMESPACE_END(Grid);

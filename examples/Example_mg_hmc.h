@@ -255,6 +255,8 @@ struct UpdateStats {
  * basis as updated, never the block-orthonormalised copy in an Aggregation.
  * Matvecs are attributed to counter categories "correct" and "measure"; the
  * operators passed in must be CountingLinearOperators for them to register.
+ * With nupdate >= 0 only the first nupdate vectors are corrected (Q still
+ * spans all of V); the rest are returned unchanged.
  */
 template<class Field>
 UpdateStats PerturbativeUpdate(std::vector<Field> &V,
@@ -263,7 +265,8 @@ UpdateStats PerturbativeUpdate(std::vector<Field> &V,
                                LinearFunction<Field> &Prec,
                                RealD tol, int maxsteps,
                                CorrectionForm form,
-                               MatvecCounter &counter)
+                               MatvecCounter &counter,
+                               int nupdate = -1)
 {
   UpdateStats st;
   RealD t0 = usecond();
@@ -291,7 +294,8 @@ UpdateStats PerturbativeUpdate(std::vector<Field> &V,
 
   Field Anv(grid), Aov(grid), rhs(grid), w(grid), r(grid);
   uint64_t c0 = counter.Get("correct");
-  for (int b = 0; b < nn; b++) {
+  int nup = (nupdate < 0) ? nn : std::min(nupdate, nn);
+  for (int b = 0; b < nup; b++) {
     counter.Set("correct");
     Anew.Op(Vold[b], Anv);
     Aold.Op(Vold[b], Aov);
