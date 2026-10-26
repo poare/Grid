@@ -59,6 +59,9 @@ Author: Peter Boyle <pboyle@bnl.gov>
 //
 
 #include <Grid/Grid.h>
+// [PO] FreeMobius5D_claude.h was never committed upstream (3a3a20b8). Until it is,
+// build this example as a stub so a plain `make -C examples` succeeds.
+#if __has_include(<Grid/qcd/utils/FreeMobius5D_claude.h>)
 #include <Grid/qcd/utils/FreeMobius5D_claude.h>
 #include <algorithm>              // std::sort, for the runtime-environment dump in ParseEnvironment
 #include <Grid/lattice/PaddedCell.h>
@@ -1143,3 +1146,11 @@ int main (int argc, char ** argv)
 
   Grid_finalize();
 }
+#else
+int main(int argc, char **argv)
+{
+  std::cerr << "Example_pvdagm_3level_FourierSmoother: Grid/qcd/utils/FreeMobius5D_claude.h "
+            << "is missing upstream; this example is a stub until it is committed" << std::endl;
+  return 1;
+}
+#endif
