@@ -213,7 +213,7 @@ int main(int argc, char **argv)
   std::cout << GridLogMessage << "======================================" << std::endl;
   std::cout << GridLogMessage << "Solver comparison summary" << std::endl;
   std::cout << GridLogMessage << "======================================" << std::endl;
-  std::cout << GridLogMessage << "PrecGCR:   steps = " << gcr.steps
+  std::cout << GridLogMessage << "PrecGCR:   steps = " << gcr.Steps()
             << "  time = " << timerGCR.Elapsed() << std::endl;
   std::cout << GridLogMessage << "IDR(s=1):  outer iters = " << idrs1.IterationsToComplete
             << "  true residual = " << idrs1.TrueResidual
