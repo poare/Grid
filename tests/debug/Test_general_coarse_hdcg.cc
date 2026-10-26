@@ -33,45 +33,6 @@ Author: Peter Boyle <pboyle@bnl.gov>
 using namespace std;
 using namespace Grid;
 
-// Want Op in CoarsenOp to call MatPcDagMatPc
-template<class Field>
-class HermOpAdaptor : public LinearOperatorBase<Field>
-{
-  LinearOperatorBase<Field> & wrapped;
-public:
-  HermOpAdaptor(LinearOperatorBase<Field> &wrapme) : wrapped(wrapme)  {};
-  void Op     (const Field &in, Field &out)   { wrapped.HermOp(in,out);  }
-  void HermOp(const Field &in, Field &out)    { wrapped.HermOp(in,out); }
-  void AdjOp     (const Field &in, Field &out){ wrapped.HermOp(in,out);  }
-  void OpDiag (const Field &in, Field &out)                  {    assert(0);  }
-  void OpDir  (const Field &in, Field &out,int dir,int disp) {    assert(0);  }
-  void OpDirAll  (const Field &in, std::vector<Field> &out)  {    assert(0);  };
-  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){    assert(0);  }
-};
-
-template<class Field> class CGSmoother : public LinearFunction<Field>
-{
-public:
-  using LinearFunction<Field>::operator();
-  typedef LinearOperatorBase<Field> FineOperator;
-  FineOperator   & _SmootherOperator;
-  int iters;
-  CGSmoother(int _iters, FineOperator &SmootherOperator) :
-    _SmootherOperator(SmootherOperator),
-    iters(_iters)
-  {
-    std::cout << GridLogMessage<<" Mirs smoother order "<<iters<<std::endl;
-  };
-  void operator() (const Field &in, Field &out) 
-  {
-    ConjugateGradient<Field>  CG(0.0,iters,false); // non-converge is just fine in a smoother
-
-    out=Zero();
-
-    CG(_SmootherOperator,in,out);
-  }
-};
-
 
 int main (int argc, char ** argv)
 {
@@ -128,10 +89,14 @@ int main (int argc, char ** argv)
   typedef HermOpAdaptor<LatticeFermionD> HermFineMatrix;
   HermFineMatrix FineHermOp(HermOpEO);
 
+  LatticeFermionD src(FrbGrid); 
+  src = ComplexD(1.0);
+  PowerMethod<LatticeFermionD>       PM;   PM(HermOpEO,src);
+
   ////////////////////////////////////////////////////////////
   ///////////// Coarse basis and Little Dirac Operator ///////
   ////////////////////////////////////////////////////////////
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector CoarseVector;
 
   NextToNextToNextToNearestStencilGeometry5D geom(Coarse5d);
@@ -150,7 +115,7 @@ int main (int argc, char ** argv)
   std::cout << "**************************************"<<std::endl;
   std::cout << "Create Subspace"<<std::endl;
   std::cout << "**************************************"<<std::endl;
-  Aggregates.CreateSubspaceChebyshevNew(RNG5,HermOpEO,95.); 
+  Aggregates.CreateSubspaceChebyshev(RNG5,HermOpEO,nbasis,35.,0.01,500);// <== last run
 
   std::cout << "**************************************"<<std::endl;
   std::cout << "Refine Subspace"<<std::endl;
@@ -175,7 +140,7 @@ int main (int argc, char ** argv)
   Coordinate rhSimd({vComplex::Nsimd(),1, 1,1,1,1});
     
   GridCartesian *CoarseMrhs = new GridCartesian(rhLatt,rhSimd,rhMpi); 
-  typedef MultiGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> MultiGeneralCoarsenedMatrix_t;
+  typedef DeprecatedMultiGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> MultiGeneralCoarsenedMatrix_t;
   MultiGeneralCoarsenedMatrix_t mrhs(geom,CoarseMrhs);
 
   mrhs.CoarsenOperator(FineHermOp,Aggregates,Coarse5d);
@@ -185,7 +150,7 @@ int main (int argc, char ** argv)
   std::cout << "**************************************"<<std::endl;
 
   typedef HermitianLinearOperator<MultiGeneralCoarsenedMatrix_t,CoarseVector> MrhsHermMatrix;
-  Chebyshev<CoarseVector>      IRLCheby(0.05,40.0,101);  // 1 iter
+  Chebyshev<CoarseVector>      IRLCheby(0.01,16.0,201);  // 1 iter
   MrhsHermMatrix MrhsCoarseOp     (mrhs);
 
   CoarseVector pm_src(CoarseMrhs);
@@ -193,10 +158,10 @@ int main (int argc, char ** argv)
   PowerMethod<CoarseVector>       cPM;
   cPM(MrhsCoarseOp,pm_src);
 
-  int Nk=nrhs;
-  int Nm=Nk*3;
-  //  int Nk=36;
-  //  int Nm=144;
+  //  int Nk=16;
+  //  int Nm=Nk*3;
+  int Nk=32;
+  int Nm=128;
   int Nstop=Nk;
   int Nconv_test_interval=1;
   
@@ -210,7 +175,7 @@ int main (int argc, char ** argv)
 							  nrhs,
 							  Nk,
 							  Nm,
-							  1e-4,10);
+							  1e-4,100);
 
   int Nconv;
   std::vector<RealD>            eval(Nm);
@@ -231,8 +196,6 @@ int main (int argc, char ** argv)
   std::cout << "**************************************"<<std::endl;
   std::cout << " Recompute coarse evecs  "<<std::endl;
   std::cout << "**************************************"<<std::endl;
-  evec.resize(Nm,Coarse5d);
-  eval.resize(Nm);
   for(int r=0;r<nrhs;r++){
     random(CRNG,c_src[r]);
   }
@@ -243,7 +206,7 @@ int main (int argc, char ** argv)
   // Deflation guesser object
   ///////////////////////
   std::cout << "**************************************"<<std::endl;
-  std::cout << " Reimport coarse evecs  "<<std::endl;
+  std::cout << " Reimport coarse evecs "<<evec.size()<<" "<<eval.size()<<std::endl;
   std::cout << "**************************************"<<std::endl;
   MultiRHSDeflation<CoarseVector> MrhsGuesser;
   MrhsGuesser.ImportEigenBasis(evec,eval);
@@ -252,9 +215,11 @@ int main (int argc, char ** argv)
   // Extra HDCG parameters
   //////////////////////////
   int maxit=3000;
-  ConjugateGradient<CoarseVector>  CG(2.0e-1,maxit,false);
-  RealD lo=2.0;
-  int ord = 9;
+  //  ConjugateGradient<CoarseVector>  CG(2.0e-1,maxit,false);
+  //  ConjugateGradient<CoarseVector>  CG(1.0e-2,maxit,false);
+  ConjugateGradient<CoarseVector>  CG(5.0e-2,maxit,false);
+  RealD lo=0.2;
+  int ord = 7;
 
   DoNothingGuesser<CoarseVector> DoNothing;
   HPDSolver<CoarseVector> HPDSolveMrhs(MrhsCoarseOp,CG,DoNothing);
@@ -266,15 +231,9 @@ int main (int argc, char ** argv)
   ShiftedHermOpLinearOperator<LatticeFermionD> ShiftedFineHermOp(HermOpEO,MirsShift);
   CGSmoother<LatticeFermionD> CGsmooth(ord,ShiftedFineHermOp) ;
 
-  TwoLevelADEF2mrhs<LatticeFermion,CoarseVector>
-    HDCGmrhs(1.0e-8, 500,
-	     FineHermOp,
-	     CGsmooth,
-	     HPDSolveMrhs,    // Used in M1
-	     HPDSolveMrhs,          // Used in Vstart
-	     MrhsProjector,
-	     MrhsGuesser,
-	     CoarseMrhs);
+  MrhsADEF2Preconditioner<LatticeFermion,CoarseVector>
+    ADEF2(FineHermOp, CGsmooth, HPDSolveMrhs, HPDSolveMrhs, MrhsProjector, MrhsGuesser, CoarseMrhs);
+  TwoLevelCGmrhs<LatticeFermion> HDCGmrhs(1.0e-8, 500, FineHermOp, ADEF2, FrbGrid);
     
   std::vector<LatticeFermionD> src_mrhs(nrhs,FrbGrid);
   std::vector<LatticeFermionD> res_mrhs(nrhs,FrbGrid);
@@ -299,6 +258,19 @@ int main (int argc, char ** argv)
 
     ConjugateGradient<LatticeFermionD>  CGfine(1.0e-8,30000,false);
     CGfine(HermOpEO, src, result);
+  }
+  {
+    std::cout << "**************************************"<<std::endl;
+    std::cout << "Calling MdagM CG"<<std::endl;
+    std::cout << "**************************************"<<std::endl;
+      
+    LatticeFermion result(FGrid); result=Zero();
+    LatticeFermion    src(FGrid); random(RNG5,src);
+    result=Zero();
+
+    MdagMLinearOperator<MobiusFermionD, LatticeFermionD> HermOp(Ddwf);
+    ConjugateGradient<LatticeFermionD>  CGfine(1.0e-8,30000,false);
+    CGfine(HermOp, src, result);
   }
 #endif  
   Grid_finalize();

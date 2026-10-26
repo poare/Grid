@@ -48,7 +48,6 @@ public:
 
  static const int Dimension = Representation::Dimension;
  static const bool isFundamental = Representation::isFundamental;
- static const int Nhcs = Options::Nhcs;
  static const bool LsVectorised=false;
  static const bool isGparity=true;
 
@@ -56,18 +55,15 @@ public:
  INHERIT_GIMPL_TYPES(Gimpl);
  
  typedef typename Options::_Coeff_t Coeff_t;
- typedef typename Options::template PrecisionMapper<Simd>::LowerPrecVector SimdL;
       
  template <typename vtype> using iImplSpinor            = iVector<iVector<iVector<vtype, Dimension>, Ns>,   Ngp>;
  template <typename vtype> using iImplPropagator        = iMatrix<iMatrix<iMatrix<vtype, Dimension>, Ns>,   Ngp>;
  template <typename vtype> using iImplHalfSpinor        = iVector<iVector<iVector<vtype, Dimension>, Nhs>,  Ngp>;
- template <typename vtype> using iImplHalfCommSpinor    = iVector<iVector<iVector<vtype, Dimension>, Nhcs>, Ngp>;
  template <typename vtype> using iImplDoubledGaugeField = iVector<iVector<iScalar<iMatrix<vtype, Dimension> >, Nds>, Ngp>;
 
   typedef iImplSpinor<Simd>            SiteSpinor;
   typedef iImplPropagator<Simd>        SitePropagator;
   typedef iImplHalfSpinor<Simd>        SiteHalfSpinor;
-  typedef iImplHalfCommSpinor<SimdL>   SiteHalfCommSpinor;
   typedef iImplDoubledGaugeField<Simd> SiteDoubledGaugeField;
 
   typedef Lattice<SiteSpinor> FermionField;
@@ -75,7 +71,7 @@ public:
   typedef Lattice<SiteDoubledGaugeField> DoubledGaugeField;
  
   typedef GparityWilsonImplParams ImplParams;
-  typedef WilsonCompressor<SiteHalfCommSpinor,SiteHalfSpinor, SiteSpinor> Compressor;
+  typedef WilsonCompressor<SiteHalfSpinor, SiteSpinor> Compressor;
   typedef WilsonStencil<SiteSpinor, SiteHalfSpinor, ImplParams> StencilImpl;
   typedef typename StencilImpl::View_type StencilView;
       
@@ -91,7 +87,7 @@ public:
 					  const _Spinor &chi, 
 					  int mu) 
   {
-    assert(0);
+    GRID_ASSERT(0);
   } 
 
   template<class _Spinor>
@@ -147,9 +143,9 @@ public:
     // Fixme X.Y.Z.T hardcode in stencil
     int mmu = mu % Nd;
         
-    // assert our assumptions
-    assert((distance == 1) || (distance == -1));  // nearest neighbour stencil hard code
-    assert((sl == 1) || (sl == 2));
+    // GRID_ASSERT our assumptions
+    GRID_ASSERT((distance == 1) || (distance == -1));  // nearest neighbour stencil hard code
+    GRID_ASSERT((sl == 1) || (sl == 2));
 
     //If this site is an global boundary site, perform the G-parity flavor twist
     if ( mmu < Nd-1 && SE->_around_the_world && St.parameters.twists[mmu] ) {
@@ -162,7 +158,7 @@ public:
 
 	  St.iCoorFromIindex(icoor,s);
               
-	  assert((icoor[direction]==0)||(icoor[direction]==1));
+	  GRID_ASSERT((icoor[direction]==0)||(icoor[direction]==1));
               
 	  int permute_lane;
 	  if ( distance == 1) {
@@ -200,7 +196,7 @@ public:
 			    const _SpinorField & phi,
 			    int mu)
   {
-    assert(0);
+    GRID_ASSERT(0);
   }
 
   template <class ref>
@@ -344,11 +340,11 @@ public:
       
  inline void outerProductImpl(PropagatorField &mat, const FermionField &Btilde, const FermionField &A){
    //mat = outerProduct(Btilde, A);
-   assert(0);
+   GRID_ASSERT(0);
   }
 
   inline void TraceSpinImpl(GaugeLinkField &mat, PropagatorField&P) {
-    assert(0);
+    GRID_ASSERT(0);
     /*
     auto tmp = TraceIndex<SpinIndex>(P);
     parallel_for(auto ss = tmp.begin(); ss < tmp.end(); ss++) {
@@ -358,7 +354,7 @@ public:
   }
 
   inline void extractLinkField(std::vector<GaugeLinkField> &mat, DoubledGaugeField &Uds){
-    assert(0);
+    GRID_ASSERT(0);
   }
  
   inline void InsertForce5D(GaugeField &mat, FermionField &Btilde, FermionField &Atilde, int mu) {
@@ -408,9 +404,5 @@ public:
 typedef GparityWilsonImpl<vComplex , FundamentalRepresentation,CoeffReal> GparityWilsonImplR;  // Real.. whichever prec
 typedef GparityWilsonImpl<vComplexF, FundamentalRepresentation,CoeffReal> GparityWilsonImplF;  // Float
 typedef GparityWilsonImpl<vComplexD, FundamentalRepresentation,CoeffReal> GparityWilsonImplD;  // Double
- 
-//typedef GparityWilsonImpl<vComplex , FundamentalRepresentation,CoeffRealHalfComms> GparityWilsonImplRL;  // Real.. whichever prec
-//typedef GparityWilsonImpl<vComplexF, FundamentalRepresentation,CoeffRealHalfComms> GparityWilsonImplFH;  // Float
-//typedef GparityWilsonImpl<vComplexD, FundamentalRepresentation,CoeffRealHalfComms> GparityWilsonImplDF;  // Double
 
 NAMESPACE_END(Grid);

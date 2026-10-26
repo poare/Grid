@@ -40,7 +40,7 @@ void SaveOperator(Coarsened &Operator,std::string file)
 #ifdef HAVE_LIME
   emptyUserRecord record;
   ScidacWriter WR(Operator.Grid()->IsBoss());
-  assert(Operator._A.size()==Operator.geom.npoint);
+  GRID_ASSERT(Operator._A.size()==Operator.geom.npoint);
   WR.open(file);
   for(int p=0;p<Operator._A.size();p++){
     auto tmp = Operator.Cell.Extract(Operator._A[p]);
@@ -57,7 +57,7 @@ void LoadOperator(Coarsened &Operator,std::string file)
   emptyUserRecord record;
   Grid::ScidacReader RD ;
   RD.open(file);
-  assert(Operator._A.size()==Operator.geom.npoint);
+  GRID_ASSERT(Operator._A.size()==Operator.geom.npoint);
   for(int p=0;p<Operator.geom.npoint;p++){
     conformable(Operator._A[p].Grid(),Operator.CoarseGrid());
     //    RD.readScidacFieldRecord(Operator._A[p],record,BINARYIO_LEXICOGRAPHIC);
@@ -74,7 +74,7 @@ void ReLoadOperator(Coarsened &Operator,std::string file)
   emptyUserRecord record;
   Grid::ScidacReader RD ;
   RD.open(file);
-  assert(Operator._A.size()==Operator.geom.npoint);
+  GRID_ASSERT(Operator._A.size()==Operator.geom.npoint);
   for(int p=0;p<Operator.geom.npoint;p++){
     auto tmp=Operator.Cell.Extract(Operator._A[p]);
     RD.readScidacFieldRecord(tmp,record,0);
@@ -112,39 +112,8 @@ void LoadBasis(aggregation &Agg, std::string file)
 #endif
 }
 
-RealD InverseApproximation(RealD x){
-  return 1.0/x;
-}
 
-// Want Op in CoarsenOp to call MatPcDagMatPc
-template<class Field>
-class HermOpAdaptor : public LinearOperatorBase<Field>
-{
-  LinearOperatorBase<Field> & wrapped;
-public:
-  HermOpAdaptor(LinearOperatorBase<Field> &wrapme) : wrapped(wrapme)  {};
-  void Op     (const Field &in, Field &out)   { wrapped.HermOp(in,out);  }
-  void HermOp(const Field &in, Field &out)    { wrapped.HermOp(in,out); }
-  void AdjOp     (const Field &in, Field &out){ wrapped.HermOp(in,out);  }
-  void OpDiag (const Field &in, Field &out)                  {    assert(0);  }
-  void OpDir  (const Field &in, Field &out,int dir,int disp) {    assert(0);  }
-  void OpDirAll  (const Field &in, std::vector<Field> &out)  {    assert(0);  };
-  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){    assert(0);  }
-};
 /*
-template<class Field> class ChebyshevSmoother : public LinearFunction<Field>
-{
-public:
-  using LinearFunction<Field>::operator();
-  typedef LinearOperatorBase<Field> FineOperator;
-  FineOperator   & _SmootherOperator;
-  Chebyshev<Field> Cheby;
-  ChebyshevSmoother(RealD _lo,RealD _hi,int _ord, FineOperator &SmootherOperator) :
-    _SmootherOperator(SmootherOperator),
-    Cheby(_lo,_hi,_ord,InverseApproximation)
-  {
-    std::cout << GridLogMessage<<" Chebyshev smoother order "<<_ord<<" ["<<_lo<<","<<_hi<<"]"<<std::endl;
-  };
   void operator() (const Field &in, Field &out) 
   {
     Field tmp(in.Grid());
@@ -153,25 +122,6 @@ public:
   }
 };
 */
-template<class Field> class CGSmoother : public LinearFunction<Field>
-{
-public:
-  using LinearFunction<Field>::operator();
-  typedef LinearOperatorBase<Field> FineOperator;
-  FineOperator   & _SmootherOperator;
-  int iters;
-  CGSmoother(int _iters, FineOperator &SmootherOperator) :
-    _SmootherOperator(SmootherOperator),
-    iters(_iters)
-  {
-    std::cout << GridLogMessage<<" Mirs smoother order "<<iters<<std::endl;
-  };
-  void operator() (const Field &in, Field &out) 
-  {
-    ConjugateGradient<Field>  CG(0.0,iters,false); // non-converge is just fine in a smoother
-    CG(_SmootherOperator,in,out);
-  }
-};
 
 
 int main (int argc, char ** argv)
@@ -240,7 +190,7 @@ int main (int argc, char ** argv)
   ////////////////////////////////////////////////////////////
   ///////////// Coarse basis and Little Dirac Operator ///////
   ////////////////////////////////////////////////////////////
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector CoarseVector;
 
   NextToNextToNextToNearestStencilGeometry5D geom(Coarse5d);
@@ -422,7 +372,7 @@ slurm-1482367.out:Grid : Message : 6169.469330 s : HDCG: Pcg converged in 487 it
       //////////////////////////////////////////
       // Build a HDCG solver
       //////////////////////////////////////////
-      TwoLevelADEF2<LatticeFermion,CoarseVector,Subspace>
+      DeprecatedTwoLevelADEF2<LatticeFermion,CoarseVector,Subspace>
 	HDCG(1.0e-8, 700,
 	     FineHermOp,
 	     CGsmooth,

@@ -35,6 +35,46 @@ Author: Peter Boyle <paboyle@ph.ed.ac.uk>
 
 using namespace std;
 using namespace Grid;
+RealD FineSmootherShift = 0.1;
+int   FineSmootherOrder = 8;
+int   FineSmootherTol   = 0;
+//RealD CoarseSmootherShift = 0.1;
+//int   CoarseSmootherOrder = 8;
+//int   CoarseSmootherTol   = 0;
+RealD CoarseSolverShift   = 0.002;
+RealD CoarseSolverTol     = 0.03;
+int   CoarseSolverOrder   = 200;
+int   CoarseMmax          = 20;   // coarse GCR restart length (was hardcoded 20)
+RealD mass=0.00078;
+void ParseEnvironment(void)
+{
+    
+  if(getenv("MASS") ) mass = atof(getenv("MASS"));
+  if(getenv("FineSmootherShift"))   FineSmootherShift   = atof(getenv("FineSmootherShift"));
+  if(getenv("FineSmootherOrder"))   FineSmootherOrder   = atoi(getenv("FineSmootherOrder"));
+  if(getenv("CoarseSolverShift"))   CoarseSolverShift   = atof(getenv("CoarseSolverShift"));
+  if(getenv("CoarseSolverTol"))     CoarseSolverTol     = atof(getenv("CoarseSolverTol"));
+  if(getenv("CoarseSolverOrder"))   CoarseSolverOrder   = atoi(getenv("CoarseSolverOrder"));
+  if(getenv("CoarseMmax"))          CoarseMmax          = atoi(getenv("CoarseMmax"));
+  if(getenv("DiagInvPrec"))
+  {
+    std::cout << GridLogMessage << "WARNING: DiagInvPrec option REMOVED (diagonal-inverse preconditioning wrecks fine->coarse null-vector inheritance); IGNORED" << std::endl;
+  }
+
+  //  if(getenv("CoarseSmootherShift")) CoarseSmootherShift = atof(getenv("CoarseSmootherShift"));
+  //  if(getenv("CoarseSmootherOrder")) CoarseSmootherOrder = atoi(getenv("CoarseSmootherOrder"));
+  
+  std::cout << GridLogMessage << "PARAM: FineSmootherShift   "<<FineSmootherShift<<std::endl;
+  std::cout << GridLogMessage << "PARAM: FineSmootherOrder   "<<FineSmootherOrder<<std::endl;
+  //  std::cout << GridLogMessage << "PARAM: CoarseSmootherShift "<<CoarseSmootherShift<<std::endl;
+  //  std::cout << GridLogMessage << "PARAM: CoarseSmootherOrder "<<CoarseSmootherOrder<<std::endl;
+  std::cout << GridLogMessage << "PARAM: CoarseSolverShift   "<<CoarseSolverShift<<std::endl;
+  std::cout << GridLogMessage << "PARAM: CoarseSolverTol     "<<CoarseSolverTol<<std::endl;
+  std::cout << GridLogMessage << "PARAM: CoarseSolverOrder   "<<CoarseSolverOrder<<std::endl;
+  std::cout << GridLogMessage << "PARAM: CoarseMmax          "<<CoarseMmax<<std::endl;
+
+  std::cout << GridLogMessage << "PARAM: MASS "<<mass<<std::endl;
+}
 
 template <class T> void readFile(T& out, std::string const fname){  
   #ifdef HAVE_LIME
@@ -45,6 +85,31 @@ template <class T> void readFile(T& out, std::string const fname){
     Grid::ScidacReader SR;
     SR.open(fname);
     SR.readScidacFieldRecord(out, record);
+    SR.close();
+  #endif
+}
+template <class Field>
+void saveSubspace(std::vector<Field> &subspace, std::string const fname){
+  #ifdef HAVE_LIME
+    std::cout << Grid::GridLogMessage << "Saving subspace (" << subspace.size() << " vectors) to: " << fname << std::endl;
+    Grid::emptyUserRecord record;
+    Grid::ScidacWriter SW(subspace[0].Grid()->IsBoss());
+    SW.open(fname);
+    for (int k = 0; k < (int)subspace.size(); k++)
+      SW.writeScidacFieldRecord(subspace[k], record);
+    SW.close();
+  #endif
+}
+
+template <class Field>
+void loadSubspace(std::vector<Field> &subspace, std::string const fname){
+  #ifdef HAVE_LIME
+    std::cout << Grid::GridLogMessage << "Loading subspace (" << subspace.size() << " vectors) from: " << fname << std::endl;
+    Grid::emptyUserRecord record;
+    Grid::ScidacReader SR;
+    SR.open(fname);
+    for (int k = 0; k < (int)subspace.size(); k++)
+      SR.readScidacFieldRecord(subspace[k], record);
     SR.close();
   #endif
 }
@@ -140,9 +205,11 @@ template<class Matrix,class Field>
 class ShiftedPVdagMLinearOperator : public LinearOperatorBase<Field> {
   Matrix &_Mat;
   Matrix &_PV;
-  RealD shift;
+  int nApp;
+  int nAppDag;
 public:
-  ShiftedPVdagMLinearOperator(RealD _shift,Matrix &Mat,Matrix &PV): shift(_shift),_Mat(Mat),_PV(PV){};
+  RealD shift;
+  ShiftedPVdagMLinearOperator(RealD _shift,Matrix &Mat,Matrix &PV): shift(_shift),_Mat(Mat),_PV(PV) , nApp(0), nAppDag(0){};
 
   void OpDiag (const Field &in, Field &out) {    assert(0);  }
   void OpDir  (const Field &in, Field &out,int dir,int disp) {    assert(0);  }
@@ -152,6 +219,7 @@ public:
     Field tmp(in.Grid());
     _Mat.M(in,tmp);
     _PV.Mdag(tmp,out);
+    nApp++;
     out = out + shift * in;
   }
   void AdjOp     (const Field &in, Field &out){
@@ -159,6 +227,7 @@ public:
     Field tmp(in.Grid());
     _PV.M(tmp,out);
     _Mat.Mdag(in,tmp);
+    nAppDag++;
     out = out + shift * in;
   }
   void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){    assert(0);  }
@@ -168,10 +237,20 @@ public:
     Op(in,tmp);
     AdjOp(tmp,out);
   }
+  void clear() {
+    nApp = 0;
+    nAppDag = 0;
+  }
+  void getApplications() {
+    std::cout << GridLogMessage << "# applications of ShiftedPVdagM: " << nApp << std::endl;
+    std::cout << GridLogMessage << "# applications of ShiftedPVdagM^dag: " << nAppDag << std::endl;
+    std::cout << GridLogMessage << "# applications total: " << nApp + nAppDag << std::endl;
+  }
 };
 template<class Fobj,class CComplex,int nbasis>
 class MGPreconditioner : public LinearFunction< Lattice<Fobj> > {
 public:
+
   using LinearFunction<Lattice<Fobj> >::operator();
 
   typedef Aggregation<Fobj,CComplex,nbasis> Aggregates;
@@ -188,6 +267,7 @@ public:
   FineSmoother   & _PostSmoother;
   CoarseOperator & _CoarseOperator;
   CoarseSolver   & _CoarseSolve;
+  std::string name;
 
   int    level;  void Level(int lv) {level = lv; };
 
@@ -196,13 +276,15 @@ public:
 		   FineSmoother &PreSmoother,
 		   FineSmoother &PostSmoother,
 		   CoarseOperator &CoarseOperator_,
-		   CoarseSolver &CoarseSolve_)
+		   CoarseSolver &CoarseSolve_,
+		   std::string _name = std::string("unnamed"))
     : _Aggregates(Agg),
       _FineOperator(Fine),
       _PreSmoother(PreSmoother),
       _PostSmoother(PostSmoother),
       _CoarseOperator(CoarseOperator_),
       _CoarseSolve(CoarseSolve_),
+      name(_name),
       level(1)  {  }
 
   virtual void operator()(const FineField &in, FineField & out) 
@@ -282,8 +364,9 @@ void runMG(
 ) {
 
   // typedef Aggregation<vSpinColourVector,vTComplex,nbasis> Subspace;
-  // typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  // typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
   // typedef LittleDiracOperator::CoarseVector CoarseVector;
+  ParseEnvironment();
 
   std::vector<LatticeFermion> subspace = AggregatesPD.subspace;
   int nbasis = subspace.size();
@@ -307,40 +390,12 @@ void runMG(
   // Subspace AggregatesPD(Coarse5d,FGrid,cb);
 
   // Orthonormalize subspace and compute nulliness
-  /*
-  std::cout << GridLogMessage << "Orthonormalizing basis and computing nulliness" << std::endl;
-  std::vector<LatticeFermion> ONB;
-  LatticeFermion w (FGrid); w = Zero();
-  LatticeFermion Dw (FGrid); Dw = Zero();
-  for (int i = 0; i < nbasis; i++) {
-    w = subspace[i];
-    for (int j = 0; j < ONB.size(); j++) {
-      // coeff = innerProduct(ONB[j], w);
-      w -= innerProduct(ONB[j], w) * ONB[j];
-    }
-    w = (1.0 / std::sqrt(norm2(w))) * w;    // normalize
 
-    Dw = Zero();
-    PVdagM.Op(subspace[i], Dw);
-    std::cout << "Before ortho=" << innerProduct(subspace[i], Dw) << std::endl;
-
-    Dw = Zero();
-    PVdagM.Op(w, Dw);
-    std::cout << "<i|D|i>=" << innerProduct(w, Dw) << "; <i|DdagD|i>=" << norm2(Dw) << std::endl;
-
-    ONB.push_back(w);
-  }
-  std::cout << "Computing <i|j> for ONB: " << std::endl;
-  for (int i = 0; i < nbasis; i++) {
-    for (int j = 0; j < nbasis; j++) {
-      std::cout << GridLogMessage << innerProduct(ONB[i], ONB[j]) << " ";
-    }
-    std::cout << GridLogMessage << std::endl;
-  }
-  */
-  
-  LittleDiracOperator LittleDiracOpPV(geom,FGrid,Coarse5d);
-  LittleDiracOpPV.CoarsenOperator(PVdagM, AggregatesPD);
+  ShiftedPVdagM.shift = CoarseSolverShift;
+  int nonherm = 0;
+  LittleDiracOperator LittleDiracOpPV(geom,FGrid,Coarse5d,nonherm);
+  LittleDiracOpPV.CoarsenOperator(ShiftedPVdagM, AggregatesPD);
+  ShiftedPVdagM.shift = FineSmootherShift;
 
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
@@ -379,29 +434,33 @@ void runMG(
   ///////////////////////////////////////
 
   std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  std::cout<<GridLogMessage<<" Coarse Grid Solve -- Level 3 "<<std::endl;
+  std::cout<<GridLogMessage<<" Coarse Grid Solve -- Level 2 "<<std::endl;
   std::cout<<GridLogMessage<<"******************* "<<std::endl;
   NonHermitianLinearOperator<LittleDiracOperator,CoarseVector> LinOpCoarse(LittleDiracOpPV);
-  // PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(3.0e-2, 100, LinOpCoarse,simple,10,10); 
-  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(1.0e-1, 100, LinOpCoarse,simple,10,10); 
-  L2PGCR.Level(3);
+  // DiagonalInverse preconditioning REMOVED (library support withdrawn: it
+  // wrecks the collinearity that makes fine->coarse null-vector inheritance
+  // free).  TrivialPrecon reproduces the former DiagInvPrec=0 path exactly.
+  PrecGeneralisedConjugateResidualNonHermitian<CoarseVector>  L2PGCR(CoarseSolverTol, (CoarseSolverOrder+CoarseMmax-1)/CoarseMmax, LinOpCoarse,simple,CoarseMmax,CoarseMmax);
+  L2PGCR.SetZeroGuess(1);              // callers zero Csol / c_res
+  L2PGCR.Level(2);
+  L2PGCR.Name("Couter");
   c_res=Zero();
   L2PGCR(c_src,c_res);
 
-  std::cout << GridLogMessage << "Coarse Grid Solve -- Level 3 operator uses: " << std::endl;
-  PVdagM.getApplications();
-  PVdagM.clear();
 
   ////////////////////////////////////////
   // Fine grid smoother
   ////////////////////////////////////////
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
-  std::cout<<GridLogMessage<<" Fine Grid Smoother -- Level 2 "<<std::endl;
-  std::cout<<GridLogMessage<<"******************* "<<std::endl;
   //  NonHermitianLinearOperator<PVdagM_t,LatticeFermionD> LinOpSmooth(PVdagM);
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCR(0.01,1,ShiftedPVdagM,simple_fine,16,16);
-  // TODO: play with this, try 0.1 for the shift (maybe in the ShiftedPVDagM actually)
-  SmootherGCR.Level(2);
+  
+  //  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCR(0.05,1,ShiftedPVdagM,simple_fine,8,8);
+  // Force 10 iters exactly, no early termination
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCR(FineSmootherTol,1,
+									    ShiftedPVdagM,simple_fine,
+									    FineSmootherOrder,FineSmootherOrder);
+  SmootherGCR.Level(1);
+  SmootherGCR.Name("Fsmoother");
+  SmootherGCR.SetZeroGuess(1);         // pre/post slots + direct call all zero their guess
 
   f_src = one;  // 1 in every element for vector 1.
   f_res=Zero();
@@ -412,26 +471,25 @@ void runMG(
 			    simple_fine,
 			    SmootherGCR,
 			    LinOpCoarse,
-			    L2PGCR);
+			    L2PGCR,
+			    "PVdagM");
   
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCR(1.0e-8,1000,PVdagM,TwoLevelPrecon,16,16);
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCR(1.0e-8,1000,PVdagM,TwoLevelPrecon,32,32);
+  L1PGCR.SetZeroGuess(1);              // f_res=Zero() before the solve
   L1PGCR.Level(1);
+  L1PGCR.Name("Fouter");
 
+  std::cout<<GridLogMessage<<"******************* "<<std::endl;
+  std::cout<<GridLogMessage<<" Running Multi Grid Solver "<<std::endl;
+  std::cout<<GridLogMessage<<"******************* "<<std::endl;
   f_res=Zero();
   L1PGCR(f_src,f_res);
 
   std::cout << GridLogMessage << "Fine Grid Smoother -- Level 2 operator uses: " << std::endl;
   PVdagM.getApplications();
   PVdagM.clear();
-
-  // Uncomment to run standard Krylov solve
-  std::cout << GridLogMessage << "Running standard Krylov solve with GCR: " << std::endl; 
-  f_res = Zero();
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> GCR(1.0e-8, 100000, PVdagM, simple_fine, 16, 16);
-  GCR(f_src, f_res);
-
-  PVdagM.getApplications();
-  PVdagM.clear();
+  ShiftedPVdagM.getApplications();
+  ShiftedPVdagM.clear();
 
 }
 
@@ -449,20 +507,17 @@ int main (int argc, char ** argv)
   // int nbasis = std::stoi(nbasisStr);
   // int smooth = std::stoi(smoothStr);
 
-  // const int Ls=24;
-  const int Ls=16;
+  const int Ls=24;
   RealD M5=1.8;
 
-  // RealD mass=0.00078;
-  RealD mass=0.01;
-  // const int nbasis = 60;
-  const int nbasis = 40;
+  
+  //  const int nbasis = 40;
+  const int nbasis = 60;
   
   std::cout << GridLogMessage << "Mass: " << mass << ", Ls: " << Ls << ", running Mobius kernel with b=1.5, c=0.5" << std::endl;
   std::cout << GridLogMessage << "nbasis: " << nbasis << std::endl;
 
-  // std::vector<int> lat_size {48, 48, 48, 96};
-  std::vector<int> lat_size {16, 16, 16, 32};
+  std::vector<int> lat_size {48, 48, 48, 96};
 
   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(lat_size, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   GridRedBlackCartesian * UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
@@ -473,11 +528,12 @@ int main (int argc, char ** argv)
   // Construct a coarsened grid
   // Coordinate clatt = GridDefaultLatt();
   Coordinate clatt = lat_size;
+  Coordinate Block({4,4,4,4});
   std::cout << GridLogMessage << "Lattice size: " << lat_size << std::endl;
   for(int d=0;d<clatt.size();d++){
-    clatt[d] = clatt[d]/2;
-    //    clatt[d] = clatt[d]/4;
+    clatt[d] = lat_size[d]/Block[d];
   }
+
   std::cout << GridLogMessage << "constructing coarse grid" << std::endl;
   GridCartesian *Coarse4d =  SpaceTimeGrid::makeFourDimGrid(clatt, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   GridCartesian *Coarse5d =  SpaceTimeGrid::makeFiveDimGrid(1,Coarse4d);
@@ -499,12 +555,14 @@ int main (int argc, char ** argv)
 
   std::cout << GridLogMessage << "Reading in gauge field" << std::endl;
   FieldMetaData header;
-  std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
-  // std::string file("/ccs/home/poare/ckpoint_lat.1000");
+  // std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
+  std::string file("/ccs/home/poare/ckpoint_lat.1000");
   NerscIO::readConfiguration(Umu,header,file);
 
+  /*
+
   // DWF, m=0.01
-  std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_337342/";
+  // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_337342/";
 
   // DWF, m=0.001
   // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_m0p001_339143/";
@@ -513,7 +571,7 @@ int main (int argc, char ** argv)
   // std::string eigenPath = "/hpcgpfs01/work/lqcd/staging/RBC/ckpoint_lat.4000/ks_evecs/PVdagM_Nm80_Nk40_Niter5000_346851/";
 
   // Frontier path
-  // std::string eigenPath = "/ccs/home/poare/lqcd/multigrid/spectra/ckpoint_lat.1000/...";
+  std::string eigenPath = "/ccs/home/poare/lqcd/multigrid/spectra/ckpoint_lat.1000/...";
   
 
   std::cout << GridLogMessage << "Loading eigenvalues" << std::endl;
@@ -535,8 +593,7 @@ int main (int argc, char ** argv)
   }
   std::cout << GridLogMessage << "Eigenvalues: " << evals << std::endl;
 
-  // int Nevecs = 20;
-  int Nevecs = 40;
+  int Nevecs = 20;
   std::vector<LatticeFermion> evecs;
   LatticeFermion evec (FGrid);
   for (int i = 0; i < Nevecs; i++) {
@@ -546,6 +603,7 @@ int main (int argc, char ** argv)
   }
   std::cout << GridLogMessage << "Evecs loaded" << std::endl;
 
+  */
   // TODO uncomment when evecs are computed!
 
   // DomainWallFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5);
@@ -562,7 +620,7 @@ int main (int argc, char ** argv)
 
   // assert(nbasis <= Nevecs);     // need to have enough evecs
 
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector CoarseVector;
 
   NextToNearestStencilGeometry5D geom(Coarse5d);
@@ -598,7 +656,8 @@ int main (int argc, char ** argv)
   //  ShiftedPVdagM_t ShiftedPVdagM(0.1,Ddwf,Dpv); // 35  ...  with 20 vecs and 2^4 blocking
   //  ShiftedPVdagM_t ShiftedPVdagM(0.1,Ddwf,Dpv); // 35  ...  with 20 vecs and 2^4 blocking, looser coarse
   //  ShiftedPVdagM_t ShiftedPVdagM(0.1,Ddwf,Dpv); // 64  ...  with 20 vecs, Christoph setup, and 2^4 blocking, looser coarse
-  ShiftedPVdagM_t ShiftedPVdagM(0.01,Ddwf,Dpv); // 
+
+  ShiftedPVdagM_t ShiftedPVdagM(FineSmootherShift,Ddwf,Dpv); // 
 
   // Run power method on HOA??
   PowerMethod<LatticeFermion>       PM;
@@ -636,68 +695,106 @@ int main (int argc, char ** argv)
 
   // - nbasis = 20, m=0.01, 35 outer iterations
   // - nbasis = 40, m=0.01, 23 outer iterations
-  // std::cout << GridLogMessage << "*** GCR setup ***" << std::endl;
-  // Subspace AggregatesGCR(Coarse5d,FGrid,cb);
-  // AggregatesGCR.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
+  std::cout << GridLogMessage << "*** GCR setup ***" << std::endl;
 
-  // std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
-  // PVdagM.getApplications();
-  // PVdagM.clear();
+  // Subspace cache: save after generation, reload on subsequent runs to skip expensive setup.
+  // Set SUBSPACE_FILE to override the default path.
+  std::string subspace_file = "/lustre/orion/phy157/proj-shared/phy157_dwf/paboyle/subspace_nb"
+                              + std::to_string(nbasis) + ".scidac";
+  if ( getenv("SUBSPACE_FILE") ) subspace_file = std::string(getenv("SUBSPACE_FILE"));
 
-  // runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
-  //   FGrid, 
-  //   Coarse5d, 
-  //   geom, 
-  //   PVdagM, 
-  //   ShiftedPVdagM, 
-  //   AggregatesGCR
-  // );
-
-  // - nbasis = 20(+20?), m=0.01, 36 outer iterations
-  // - nbasis = 40(+40?), m=0.01, 24 outer iterations
-  // std::cout << GridLogMessage << "*** CG setup ***" << std::endl;
-  // Subspace AggregatesCG(Coarse5d,FGrid,cb);
-  // AggregatesCG.CreateSubspace(RNG5,PVdagM,nbasis);
-
-  // std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
-  // PVdagM.getApplications();
-  // PVdagM.clear();
-
-  // runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
-  //   FGrid, 
-  //   Coarse5d, 
-  //   geom, 
-  //   PVdagM, 
-  //   ShiftedPVdagM, 
-  //   AggregatesCG
-  // );
-
-  // Switches to vary for CG: 
-  // - solve tolerance / # of solves in setup
-  // - # deflation vectors
-  // I want to study nulliness and # of deflation vectors vs convergence speed
-
-  // Ritz vectors
-  std::cout << GridLogMessage << "*** KS setup ***" << std::endl;
-  std::cout << GridLogMessage << "Also running standard CG solve for Shamir" << std::endl;
-  Subspace AggregatesKS(Coarse5d,FGrid,cb);
-  for (int b = 0; b < nbasis; b++) {
-    AggregatesKS.subspace[b] = evecs[b];
+  // Check if subspace file exists (boss rank checks, result broadcast via GlobalSum).
+  uint64_t file_exists = 0;
+  if ( UGrid->IsBoss() ) {
+    std::ifstream f(subspace_file);
+    file_exists = f.good() ? 1 : 0;
   }
+  UGrid->GlobalSum(file_exists);
 
+  Subspace AggregatesGCR(Coarse5d,FGrid,cb);
+
+  if ( file_exists ) {
+    std::cout << GridLogMessage << "*** Loading subspace from disk ***" << std::endl;
+    loadSubspace(AggregatesGCR.subspace, subspace_file);
+    // Insurance: GLOBAL (whole-lattice) orthonormalise, matching what
+    // CreateSubspaceGCR applies to generated subspaces (Aggregates.h:196), so a
+    // reloaded file ends in the same state.  This replaces the block
+    // Orthogonalise() previously called here -- that is redundant (CoarsenOperator
+    // block-GS's the subspace internally) and would leave a loaded file block-
+    // orthonormal while a generated one is globally orthonormal.  Global GS is
+    // span-preserving, so the coarse operator is unchanged.
+    AggregatesGCR.GlobalOrthonormalise();
+    std::cout << GridLogMessage << "Subspace loaded and globally orthonormalised." << std::endl;
+  } else {
+    std::cout << GridLogMessage << "*** GCR subspace generation ***" << std::endl;
+    AggregatesGCR.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
+    std::cout << GridLogMessage << "Subspace generation: PVdagM operator uses:" << std::endl;
+    PVdagM.getApplications();
+    PVdagM.clear();
+    saveSubspace(AggregatesGCR.subspace, subspace_file);
+    std::cout << GridLogMessage << "Subspace saved to: " << subspace_file << std::endl;
+  }
+  
   std::cout << GridLogMessage << "Basis construction operator uses: " << std::endl;
   PVdagM.getApplications();
   PVdagM.clear();
 
+  std::cout << GridLogMessage << "Calling runMG " << std::endl;
   runMG<PVdagM_t, ShiftedPVdagM_t, Subspace, LittleDiracOperator, CoarseVector, TwoLevelMG>(
     FGrid, 
     Coarse5d, 
     geom, 
     PVdagM, 
     ShiftedPVdagM, 
-    AggregatesKS
+    AggregatesGCR
   );
 
+  //////////////////////////////////
+  // Standard CG
+  //////////////////////////////////
+#if 0
+  {
+  std::cout << "**************************************"<<std::endl;
+  std::cout << "Calling red black CG"<<std::endl;
+  std::cout << "**************************************"<<std::endl;
+    ConjugateGradient<LatticeFermionD>  CGfine(1.0e-8,30000,false);
+    SchurDiagMooeeOperator<MobiusFermionD, LatticeFermion> HermOpEO(Ddwf);
+      
+    LatticeFermion result(FrbGrid); result=Zero();
+    LatticeFermion    src(FrbGrid); random(RNG5,src);
+    result=Zero();
+
+    CGfine(HermOpEO, src, result);
+  }
+  {
+    std::cout << "**************************************"<<std::endl;
+    std::cout << "Calling MdagM CG"<<std::endl;
+    std::cout << "**************************************"<<std::endl;
+      
+    LatticeFermion result(FGrid); result=Zero();
+    LatticeFermion    src(FGrid); random(RNG5,src);
+    result=Zero();
+
+    MdagMLinearOperator<MobiusFermionD, LatticeFermionD> HermOp(Ddwf);
+    ConjugateGradient<LatticeFermionD>  CGfine(1.0e-8,100000,false);
+    CGfine(HermOp, src, result);
+  }
+  {
+    std::cout << "**************************************"<<std::endl;
+    std::cout << "Calling PVdagM GCR"<<std::endl;
+    std::cout << "**************************************"<<std::endl;
+
+    LatticeFermion result(FGrid); result=Zero();
+    LatticeFermion    src(FGrid); random(RNG5,src);
+    result=Zero();
+    PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> GCR(1.0e-8,3000,PVdagM,simple_fine,50,50);
+    GCR.Name("Fbaseline");
+    GCR.SetZeroGuess(1);               // result=Zero() above
+    GCR(src,result);
+  }
+#endif  
+
+  
   std::cout<<GridLogMessage<<std::endl;
   std::cout<<GridLogMessage << "Done "<< std::endl;
 

@@ -85,13 +85,13 @@ public:
   PVdagMLinearOperator(Matrix &Mat,Matrix &PV): _Mat(Mat),_PV(PV){};
 
   void OpDiag (const Field &in, Field &out) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDir  (const Field &in, Field &out,int dir,int disp) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDirAll  (const Field &in, std::vector<Field> &out){
-    assert(0);
+    GRID_ASSERT(0);
   };
   void Op     (const Field &in, Field &out){
     Field tmp(in.Grid());
@@ -104,72 +104,16 @@ public:
     _Mat.Mdag(in,tmp);
   }
   void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
-    assert(0);
+    GRID_ASSERT(0);
   }
   void HermOp(const Field &in, Field &out){
-    assert(0);
+    GRID_ASSERT(0);
   }
 };
 
 
-RealD InverseApproximation(RealD x){
-  return 1.0/x;
-}
 
-template<class Field,class Matrix> class ChebyshevSmoother : public LinearFunction<Field>
-{
-public:
-  using LinearFunction<Field>::operator();
-  typedef LinearOperatorBase<Field>                            FineOperator;
-  Matrix         & _SmootherMatrix;
-  FineOperator   & _SmootherOperator;
-  
-  Chebyshev<Field> Cheby;
 
-  ChebyshevSmoother(RealD _lo,RealD _hi,int _ord, FineOperator &SmootherOperator,Matrix &SmootherMatrix) :
-    _SmootherOperator(SmootherOperator),
-    _SmootherMatrix(SmootherMatrix),
-    Cheby(_lo,_hi,_ord,InverseApproximation)
-  {};
-
-  void operator() (const Field &in, Field &out) 
-  {
-    Field tmp(in.Grid());
-    MdagMLinearOperator<Matrix,Field>   MdagMOp(_SmootherMatrix); 
-    _SmootherOperator.AdjOp(in,tmp);
-    Cheby(MdagMOp,tmp,out);         
-  }
-};
-
-template<class Field,class Matrix> class MirsSmoother : public LinearFunction<Field>
-{
-public:
-  typedef LinearOperatorBase<Field>                            FineOperator;
-  Matrix         & SmootherMatrix;
-  FineOperator   & SmootherOperator;
-  RealD tol;
-  RealD shift;
-  int   maxit;
-
-  MirsSmoother(RealD _shift,RealD _tol,int _maxit,FineOperator &_SmootherOperator,Matrix &_SmootherMatrix) :
-    shift(_shift),tol(_tol),maxit(_maxit),
-    SmootherOperator(_SmootherOperator),
-    SmootherMatrix(_SmootherMatrix)
-  {};
-
-  void operator() (const Field &in, Field &out) 
-  {
-    ZeroGuesser<Field> Guess;
-    ConjugateGradient<Field>  CG(tol,maxit,false);
- 
-    Field src(in.Grid());
-
-    ShiftedMdagMLinearOperator<SparseMatrixBase<Field>,Field> MdagMOp(SmootherMatrix,shift);
-    SmootherOperator.AdjOp(in,src);
-    Guess(src,out);
-    CG(MdagMOp,src,out); 
-  }
-};
 
 #define GridLogLevel std::cout << GridLogMessage <<std::string(level,'\t')<< " Level "<<level <<" "
 
@@ -411,7 +355,7 @@ int main (int argc, char ** argv)
 
   Subspace Aggregates(Coarse5d,FGrid,0);
 
-  assert ( (nbasis & 0x1)==0);
+  GRID_ASSERT ( (nbasis & 0x1)==0);
   {
     int nb=nbasis/2;
     Aggregates.CreateSubspaceChebyshev(RNG5,HermDefOp,nb,60.0,0.02,500,100,100,0.0);

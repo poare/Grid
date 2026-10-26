@@ -45,7 +45,7 @@ public:
 
   using OperatorFunction<Field>::operator();
   
-  bool ErrorOnNoConverge;  // throw an assert when the CG fails to converge.
+  bool ErrorOnNoConverge;  // throw an GRID_ASSERT when the CG fails to converge.
                            // Defaults true.
   RealD Tolerance;
   Integer MaxIterations;
@@ -94,7 +94,7 @@ public:
     ssq = norm2(src);
     RealD guess = norm2(psi);
     NormTimer.Stop();
-    assert(std::isnan(guess) == 0);
+    GRID_ASSERT(std::isnan(guess) == 0);
     AssignTimer.Start();
     if ( guess == 0.0 ) {
       r = src;
@@ -212,17 +212,21 @@ public:
 		  << "\tTarget " << Tolerance << std::endl;
 
 	//	std::cout << GridLogMessage << "\tPreamble   " << PreambleTimer.Elapsed() <<std::endl;
-	std::cout << GridLogMessage << "\tSolver Elapsed    " << SolverTimer.Elapsed() <<std::endl;
-        std::cout << GridLogPerformance << "Time breakdown "<<std::endl;
-	std::cout << GridLogPerformance << "\tMatrix     " << MatrixTimer.Elapsed() <<std::endl;
-	std::cout << GridLogPerformance << "\tLinalg     " << LinalgTimer.Elapsed() <<std::endl;
-	std::cout << GridLogPerformance << "\t\tInner      " << InnerTimer.Elapsed() <<std::endl;
-	std::cout << GridLogPerformance << "\t\tAxpyNorm   " << AxpyNormTimer.Elapsed() <<std::endl;
-	std::cout << GridLogPerformance << "\t\tLinearComb " << LinearCombTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\tPreamble   " << PreambleTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\tConstruct  " << ConstructTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\tNorm       " << NormTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\tAssign     " << AssignTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\tSolver     " << SolverTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "Solver breakdown "<<std::endl;
+	std::cout << GridLogMessage << "\tMatrix     " << MatrixTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\tLinalg     " << LinalgTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\t\tInner      " << InnerTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\t\tAxpyNorm   " << AxpyNormTimer.Elapsed() <<std::endl;
+	std::cout << GridLogMessage << "\t\tLinearComb " << LinearCombTimer.Elapsed() <<std::endl;
 
 	std::cout << GridLogDebug << "\tMobius flop rate " << DwfFlops/ usecs<< " Gflops " <<std::endl;
 
-        if (ErrorOnNoConverge) assert(true_residual / Tolerance < 10000.0);
+        if (ErrorOnNoConverge) GRID_ASSERT(true_residual / Tolerance < 10000.0);
 
 	IterationsToComplete = k;	
 	TrueResidual = true_residual;
@@ -251,7 +255,7 @@ public:
     std::cout << GridLogPerformance << "\t\tAxpyNorm   " << AxpyNormTimer.Elapsed() <<std::endl;
     std::cout << GridLogPerformance << "\t\tLinearComb " << LinearCombTimer.Elapsed() <<std::endl;
 
-    if (ErrorOnNoConverge) assert(0);
+    if (ErrorOnNoConverge) GRID_ASSERT(0);
     IterationsToComplete = k;
 
   }

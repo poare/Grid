@@ -20,6 +20,9 @@
     See the full license in the file "LICENSE" in the top level distribution directory
     *************************************************************************************/
     /*  END LEGAL */
+#include "disable_benchmarks_without_instantiations.h"
+#ifdef ENABLE_FERMION_INSTANTIATIONS
+
 #include <Grid/Grid.h>
 #ifdef GRID_CUDA
 #define CUDA_PROFILE
@@ -273,12 +276,19 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
     Dw.Dhop(src,result,0);
     std::cout<<GridLogMessage<<"Called warmup"<<std::endl;
     double t0=usecond();
+    // Accumulate BYTES and TIME separately and divide once.  Averaging the
+    // per-call rate instead would over-weight the fast calls: one anomalously
+    // short exchange contributes an enormous rate to the mean.
+    double locBytes = 0;   // off-node bytes moved by THIS rank, over all calls
+    double locTime  = 0;   // microseconds THIS rank spent in the exchange
     for(int i=0;i<ncall;i++){
       Dw.Dhop(src,result,0);
+      locBytes += Dw.Stencil.OffNodeBytes;
+      locTime  += Dw.Stencil.CommTimer;
     }
     double t1=usecond();
     FGrid->Barrier();
-
+    
     double volume=Ls;  for(int mu=0;mu<Nd;mu++) volume=volume*latt4[mu];
     double flops=single_site_flops*volume*ncall;
 
@@ -295,6 +305,34 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
     std::cout<<GridLogMessage << "mflop/s =   "<< flops/(t1-t0)<<std::endl;
     std::cout<<GridLogMessage << "mflop/s per rank =  "<< flops/(t1-t0)/NP<<std::endl;
     std::cout<<GridLogMessage << "mflop/s per node =  "<< flops/(t1-t0)/NN<<std::endl;
+    //////////////////////////////////////////////////////////////////////
+    // Delivered inter-node bandwidth, measured CONCURRENT WITH COMPUTE.
+    //
+    // Bytes are summed over the whole machine; the exchange time is averaged
+    // over ranks; the result is reported per node.  Reduced ONCE here rather
+    // than inside CommunicateComplete -- a collective in the exchange would
+    // perturb the quantity being measured.
+    //
+    // bytes / microsecond == MB/s exactly (decimal MB).
+    //
+    // NB OffNodeBytes is bidirectional (send + receive) only under
+    // ACCELERATOR_AWARE_MPI; on the host-staged path the send side is
+    // deferred to PollDtoH and is not currently counted, so numbers from the
+    // two paths are not comparable.
+    //////////////////////////////////////////////////////////////////////
+    {
+      double sumBytes = locBytes;  FGrid->GlobalSum(sumBytes);   // whole machine
+      double sumTime  = locTime;   FGrid->GlobalSum(sumTime);
+      double avgTime  = sumTime/NP;                              // mean over ranks
+      double BWnode   = sumBytes/avgTime/NN;                     // MB/s per node
+      std::cout<<GridLogMessage << "Comms: off-node bytes/call/node = "
+               << sumBytes/ncall/NN/1.0e6 <<" MB"<<std::endl;
+      std::cout<<GridLogMessage << "Comms: in-exchange time = "
+               << avgTime/ncall <<" us/call (mean over "<<NP<<" ranks)"<<std::endl;
+      std::cout<<GridLogMessage << "Comms: delivered inter-node bandwidth = "
+               << BWnode <<" MB/s per node  ("<< BWnode/1000.0
+               <<" GB/s per node, "<<NN<<" nodes)"<<std::endl;
+    }
     err = ref-result;
     n2e = norm2(err);
     std::cout<<GridLogMessage << "norm diff   "<< n2e<< "  Line "<<__LINE__ <<std::endl;
@@ -312,7 +350,7 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
       FGrid->Barrier();
       exit(-1);
     }
-    assert (n2e< 1.0e-4 );
+    GRID_ASSERT (n2e< 1.0e-4 );
   }
 
   if (1)
@@ -370,7 +408,7 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
   n2e= norm2(err);
   std::cout<<GridLogMessage << "norm dag diff   "<< n2e<< "  Line "<<__LINE__ <<std::endl;
 
-  assert((n2e)<1.0e-4);
+  GRID_ASSERT((n2e)<1.0e-4);
   
   FermionField src_e (FrbGrid);
   FermionField src_o (FrbGrid);
@@ -402,8 +440,11 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
     FGrid->Barrier();
     Dw.DhopEO(src_o,r_e,DaggerNo);
     double t0=usecond();
+    double locBytes = 0, locTime = 0;
     for(int i=0;i<ncall;i++){
       Dw.DhopEO(src_o,r_e,DaggerNo);
+      locBytes += Dw.StencilOdd.OffNodeBytes;   // DhopEO drives StencilOdd,
+      locTime  += Dw.StencilOdd.CommTimer;      // NOT the full-grid Stencil
     }
     double t1=usecond();
     FGrid->Barrier();
@@ -414,6 +455,13 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
     std::cout<<GridLogMessage << "Deo mflop/s =   "<< flops/(t1-t0)<<std::endl;
     std::cout<<GridLogMessage << "Deo mflop/s per rank   "<< flops/(t1-t0)/NP<<std::endl;
     std::cout<<GridLogMessage << "Deo mflop/s per node   "<< flops/(t1-t0)/NN<<std::endl;
+    {
+      double sumBytes = locBytes;  FGrid->GlobalSum(sumBytes);
+      double sumTime  = locTime;   FGrid->GlobalSum(sumTime);
+      double avgTime  = sumTime/NP;
+      std::cout<<GridLogMessage << "Deo comms: delivered inter-node bandwidth = "
+               << sumBytes/avgTime/NN <<" MB/s per node"<<std::endl;
+    }
   }
   Dw.DhopEO(src_o,r_e,DaggerNo);
   Dw.DhopOE(src_e,r_o,DaggerNo);
@@ -429,13 +477,14 @@ void Benchmark(int Ls, Coordinate Dirichlet,bool sloppy)
   err = r_eo-result;
   n2e= norm2(err);
   std::cout<<GridLogMessage << "norm diff   "<< n2e<<std::endl;
-  assert(n2e<1.0e-4);
+  GRID_ASSERT(n2e<1.0e-4);
 
   pickCheckerboard(Even,src_e,err);
   pickCheckerboard(Odd,src_o,err);
   std::cout<<GridLogMessage << "norm diff even  "<< norm2(src_e)<<std::endl;
   std::cout<<GridLogMessage << "norm diff odd   "<< norm2(src_o)<<std::endl;
 
-  assert(norm2(src_e)<1.0e-4);
-  assert(norm2(src_o)<1.0e-4);
+  GRID_ASSERT(norm2(src_e)<1.0e-4);
+  GRID_ASSERT(norm2(src_o)<1.0e-4);
 }
+#endif

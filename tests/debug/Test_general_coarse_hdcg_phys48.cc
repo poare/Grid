@@ -44,7 +44,7 @@ void SaveOperator(Coarsened &Operator,std::string file)
 #ifdef HAVE_LIME
   emptyUserRecord record;
   ScidacWriter WR(Operator.Grid()->IsBoss());
-  assert(Operator._A.size()==Operator.geom.npoint);
+  GRID_ASSERT(Operator._A.size()==Operator.geom.npoint);
   WR.open(file);
   for(int p=0;p<Operator._A.size();p++){
     auto tmp = Operator.Cell.Extract(Operator._A[p]);
@@ -61,7 +61,7 @@ void LoadOperator(Coarsened &Operator,std::string file)
   emptyUserRecord record;
   Grid::ScidacReader RD ;
   RD.open(file);
-  assert(Operator._A.size()==Operator.geom.npoint);
+  GRID_ASSERT(Operator._A.size()==Operator.geom.npoint);
   for(int p=0;p<Operator.geom.npoint;p++){
     conformable(Operator._A[p].Grid(),Operator.CoarseGrid());
     //    RD.readScidacFieldRecord(Operator._A[p],record,BINARYIO_LEXICOGRAPHIC);
@@ -78,7 +78,7 @@ void ReLoadOperator(Coarsened &Operator,std::string file)
   emptyUserRecord record;
   Grid::ScidacReader RD ;
   RD.open(file);
-  assert(Operator._A.size()==Operator.geom.npoint);
+  GRID_ASSERT(Operator._A.size()==Operator.geom.npoint);
   for(int p=0;p<Operator.geom.npoint;p++){
     auto tmp=Operator.Cell.Extract(Operator._A[p]);
     RD.readScidacFieldRecord(tmp,record,0);
@@ -147,7 +147,7 @@ void LoadEigenvectors(std::vector<RealD>            &eval,
 
     Grid::ScidacReader RD ;
     RD.open(evec_file);
-    assert(evec.size()==eval.size());
+    GRID_ASSERT(evec.size()==eval.size());
     for(int k=0;k<eval.size();k++) {
       RD.readScidacFieldRecord(evec[k],record);
     }
@@ -155,44 +155,7 @@ void LoadEigenvectors(std::vector<RealD>            &eval,
 #endif
 }
 
-// Want Op in CoarsenOp to call MatPcDagMatPc
-template<class Field>
-class HermOpAdaptor : public LinearOperatorBase<Field>
-{
-  LinearOperatorBase<Field> & wrapped;
-public:
-  HermOpAdaptor(LinearOperatorBase<Field> &wrapme) : wrapped(wrapme)  {};
-  void Op     (const Field &in, Field &out)   { wrapped.HermOp(in,out);  }
-  void HermOp(const Field &in, Field &out)    { wrapped.HermOp(in,out); }
-  void AdjOp     (const Field &in, Field &out){ wrapped.HermOp(in,out);  }
-  void OpDiag (const Field &in, Field &out)                  {    assert(0);  }
-  void OpDir  (const Field &in, Field &out,int dir,int disp) {    assert(0);  }
-  void OpDirAll  (const Field &in, std::vector<Field> &out)  {    assert(0);  };
-  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){    assert(0);  }
-};
 
-template<class Field> class CGSmoother : public LinearFunction<Field>
-{
-public:
-  using LinearFunction<Field>::operator();
-  typedef LinearOperatorBase<Field> FineOperator;
-  FineOperator   & _SmootherOperator;
-  int iters;
-  CGSmoother(int _iters, FineOperator &SmootherOperator) :
-    _SmootherOperator(SmootherOperator),
-    iters(_iters)
-  {
-    std::cout << GridLogMessage<<" Mirs smoother order "<<iters<<std::endl;
-  };
-  void operator() (const Field &in, Field &out) 
-  {
-    ConjugateGradient<Field>  CG(0.0,iters,false); // non-converge is just fine in a smoother
-
-    out=Zero();
-
-    CG(_SmootherOperator,in,out);
-  }
-};
 
 
 int main (int argc, char ** argv)
@@ -255,7 +218,7 @@ int main (int argc, char ** argv)
   ////////////////////////////////////////////////////////////
   ///////////// Coarse basis and Little Dirac Operator ///////
   ////////////////////////////////////////////////////////////
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector CoarseVector;
 
   NextToNextToNextToNearestStencilGeometry5D geom(Coarse5d);
@@ -306,7 +269,7 @@ int main (int argc, char ** argv)
   Coordinate rhSimd({vComplex::Nsimd(),1, 1,1,1,1});
     
   GridCartesian *CoarseMrhs = new GridCartesian(rhLatt,rhSimd,rhMpi); 
-  typedef MultiGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> MultiGeneralCoarsenedMatrix_t;
+  typedef DeprecatedMultiGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> MultiGeneralCoarsenedMatrix_t;
   MultiGeneralCoarsenedMatrix_t mrhs(geom,CoarseMrhs);
 
   std::cout << "**************************************"<<std::endl;
@@ -408,15 +371,9 @@ int main (int argc, char ** argv)
     MrhsGuesser.ImportEigenBasis(evec,eval);
 
     CGSmoother<LatticeFermionD> CGsmooth(Refineord,ShiftedFineHermOp) ;
-    TwoLevelADEF2mrhs<LatticeFermion,CoarseVector>
-      HDCGmrhsRefine(RefineTol, 500,
-		     RefineFineHermOp,
-		     CGsmooth,
-		     HPDSolveMrhs,    // Used in M1
-		     HPDSolveMrhs,    // Used in Vstart
-		     MrhsProjector,
-		     MrhsGuesser,
-		     CoarseMrhs);
+    MrhsADEF2Preconditioner<LatticeFermion,CoarseVector>
+    HDCGmrhsRefine_ADEF2(RefineFineHermOp, CGsmooth, HPDSolveMrhs, HPDSolveMrhs, MrhsProjector, MrhsGuesser, CoarseMrhs);
+  TwoLevelCGmrhs<LatticeFermion> HDCGmrhsRefine(RefineTol, 500, RefineFineHermOp, HDCGmrhsRefine_ADEF2, MrhsProjector.fine_grid);
 
     // Reload the first pass aggregates, because we orthogonalised them
     LoadBasis(Aggregates,subspace_file);
@@ -474,15 +431,9 @@ int main (int argc, char ** argv)
   MrhsProjector.Allocate(nbasis,FrbGrid,Coarse5d);
   MrhsProjector.ImportBasis(Aggregates.subspace);
       
-  TwoLevelADEF2mrhs<LatticeFermion,CoarseVector>
-    HDCGmrhs(1.0e-8, 500,
-	     FineHermOp,
-	     CGsmooth,
-	     HPDSolveMrhs,    // Used in M1
-	     HPDSolveMrhs,          // Used in Vstart
-	     MrhsProjector,
-	     MrhsGuesser,
-	     CoarseMrhs);
+  MrhsADEF2Preconditioner<LatticeFermion,CoarseVector>
+    HDCGmrhs_ADEF2(FineHermOp, CGsmooth, HPDSolveMrhs, HPDSolveMrhs, MrhsProjector, MrhsGuesser, CoarseMrhs);
+  TwoLevelCGmrhs<LatticeFermion> HDCGmrhs(1.0e-8, 500, FineHermOp, HDCGmrhs_ADEF2, MrhsProjector.fine_grid);
     
   std::vector<LatticeFermionD> src_mrhs(nrhs,FrbGrid);
   std::vector<LatticeFermionD> res_mrhs(nrhs,FrbGrid);

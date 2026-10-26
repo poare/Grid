@@ -180,7 +180,7 @@ template<class Impl>
 class GaugeStatistics
 {
 public:
-  void operator()(Lattice<vLorentzColourMatrixD> & data,FieldMetaData &header)
+  void operator()(typename Impl::Field & data,FieldMetaData &header)
   {
     header.link_trace = WilsonLoops<Impl>::linkTrace(data);
     header.plaquette  = WilsonLoops<Impl>::avgPlaquette(data);
@@ -188,13 +188,24 @@ public:
 };
 typedef GaugeStatistics<PeriodicGimplD> PeriodicGaugeStatistics;
 typedef GaugeStatistics<ConjugateGimplD> ConjugateGaugeStatistics;
+typedef GaugeStatistics<lexPeriodicGimplD> lexPeriodicGaugeStatistics;
+typedef GaugeStatistics<lexConjugateGimplD> lexConjugateGaugeStatistics;
 template<> inline void PrepareMetaData<vLorentzColourMatrixD>(Lattice<vLorentzColourMatrixD> & field, FieldMetaData &header)
 {
   GridBase *grid = field.Grid();
   std::string format = getFormatString<vLorentzColourMatrixD>();
   header.floating_point = format;
   header.checksum = 0x0; // Nersc checksum unused in ILDG, Scidac
-  GridMetaData(grid,header); 
+  GridMetaData(grid,header);
+  MachineCharacteristics(header);
+}
+template<> inline void PrepareMetaData<sLorentzColourMatrixD>(Lattice<sLorentzColourMatrixD> & field, FieldMetaData &header)
+{
+  GridBase *grid = field.Grid();
+  std::string format = getFormatString<sLorentzColourMatrixD>();
+  header.floating_point = format;
+  header.checksum = 0x0; // Nersc checksum unused in ILDG, Scidac
+  GridMetaData(grid,header);
   MachineCharacteristics(header);
 }
 
@@ -203,7 +214,7 @@ template<> inline void PrepareMetaData<vLorentzColourMatrixD>(Lattice<vLorentzCo
 //////////////////////////////////////////////////////////////////////
 inline void reconstruct3(LorentzColourMatrix & cm)
 {
-  assert( Nc < 4 && Nc > 1 ) ;
+  GRID_ASSERT( Nc < 4 && Nc > 1 ) ;
   for(int mu=0;mu<Nd;mu++){
     #if Nc == 2
       cm(mu)()(1,0) = -adj(cm(mu)()(0,y)) ;
@@ -240,7 +251,7 @@ struct BinarySimpleUnmunger {
     sobj_stype *in_buffer = (sobj_stype *)&in;
     size_t fobj_words = sizeof(out) / sizeof(fobj_stype);
     size_t sobj_words = sizeof(in) / sizeof(sobj_stype);
-    assert(fobj_words == sobj_words);
+    GRID_ASSERT(fobj_words == sobj_words);
     
     for (unsigned int word = 0; word < sobj_words; word++)
       out_buffer[word] = in_buffer[word];  // type conversion on the fly
@@ -259,7 +270,7 @@ struct BinarySimpleMunger {
     sobj_stype *out_buffer = (sobj_stype *)&out;
     size_t fobj_words = sizeof(in) / sizeof(fobj_stype);
     size_t sobj_words = sizeof(out) / sizeof(sobj_stype);
-    assert(fobj_words == sobj_words);
+    GRID_ASSERT(fobj_words == sobj_words);
     
     for (unsigned int word = 0; word < sobj_words; word++)
       out_buffer[word] = in_buffer[word];  // type conversion on the fly

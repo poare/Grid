@@ -33,6 +33,7 @@ NAMESPACE_CHECK(blas);
 #include <Grid/algorithms/blas/BatchedBlas.h>
 
 NAMESPACE_CHECK(algorithms);
+#include <Grid/algorithms/SplitOperator.h>
 #include <Grid/algorithms/SparseMatrix.h>
 #include <Grid/algorithms/LinearOperator.h>
 #include <Grid/algorithms/Preconditioner.h>
@@ -51,6 +52,8 @@ NAMESPACE_CHECK(approx);
 #include <Grid/algorithms/deflation/MultiRHSBlockProject.h>
 #include <Grid/algorithms/deflation/MultiRHSDeflation.h>
 #include <Grid/algorithms/deflation/MultiRHSBlockCGLinalg.h>
+// Not really deflation, but useful
+#include <Grid/algorithms/blas/MomentumProject.h>
 NAMESPACE_CHECK(deflation);
 #include <Grid/algorithms/iterative/ConjugateGradient.h>
 NAMESPACE_CHECK(ConjGrad);

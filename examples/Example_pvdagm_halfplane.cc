@@ -1,8 +1,6 @@
 /*
  * Example_pvdagm_halfplane.cc
  *
- * Peter's code for computing the FOV as a function of madj
- *
  * Standalone fine-operator diagnostic: the EES half-plane margin of the
  * (non-Hermitian) PV-preconditioned Mobius DWF operator
  *
@@ -172,7 +170,7 @@ int main (int argc, char ** argv)
     int   N  = getenv("MADJ_N")   ? atoi(getenv("MADJ_N"))   : 6;
     RealD lo = getenv("MADJ_MIN") ? atof(getenv("MADJ_MIN")) : mass;
     RealD hi = getenv("MADJ_MAX") ? atof(getenv("MADJ_MAX")) : 1.0;
-    // GRID_ASSERT(N>=1);
+    GRID_ASSERT(N>=1);
     for(int i=0;i<N;i++)
       madj_list.push_back( (N==1) ? lo : lo*std::pow(hi/lo, double(i)/double(N-1)) );
   }

@@ -52,8 +52,30 @@ public:
   virtual void AdjOp  (const Field &in, Field &out) = 0; // Abstract base
   virtual void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2)=0;
   virtual void HermOp(const Field &in, Field &out)=0;
+
+  // As CheckerBoardedSparseMatrixBase::SplitClone; the returned bundle's Linop is the
+  // same kind of wrapper as this one. Collective. nullptr if not supported.
+  virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+  {
+    return nullptr;
+  }
+
   virtual ~LinearOperatorBase(){};
 };
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// The wrappers below are templates on an arbitrary Matrix, and their virtual SplitClone is
+// instantiated with the class, so it must compile for Matrix types with no SplitClone.
+/////////////////////////////////////////////////////////////////////////////////////////////
+template<class Field,class Matrix>
+SplitOperator<Field> *SplitCloneMatrix(Matrix &Mat,const Coordinate &mpi_split)
+{
+  if constexpr ( std::is_base_of<CheckerBoardedSparseMatrixBase<Field>,Matrix>::value ) {
+    return Mat.SplitClone(mpi_split);
+  } else {
+    return nullptr;
+  }
+}
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -64,7 +86,7 @@ public:
 //
 // I'm not entirely happy with implementation; to share the Schur code between herm and non-herm
 // while still having a "OpAndNorm" in the abstract base I had to implement it in both cases
-// with an assert trap in the non-herm. This isn't right; there must be a better C++ way to
+// with an GRID_ASSERT trap in the non-herm. This isn't right; there must be a better C++ way to
 // do it, but I fear it required multiple inheritance and mixed in abstract base classes
 /////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -101,6 +123,17 @@ public:
   }
   void HermOp(const Field &in, Field &out){
     _Mat.MdagM(in,out);
+  }
+
+  virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+  {
+    SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+    if ( split == nullptr ) {
+      return nullptr;
+    }
+    split->Linop     = new MdagMLinearOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+    split->FieldGrid = split->Matrix->Grid();
+    return split;
   }
 };
 template<class Matrix,class Field>
@@ -148,22 +181,22 @@ public:
   // Support for coarsening to a multigrid
   void OpDiag (const Field &in, Field &out) {
     _Mat.Mdiag(in,out);
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDir  (const Field &in, Field &out,int dir,int disp) {
     _Mat.Mdir(in,out,dir,disp);
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDirAll  (const Field &in, std::vector<Field> &out){
-    assert(0);
+    GRID_ASSERT(0);
   };
   void Op     (const Field &in, Field &out){
     _Mat.M(in,out);
-    assert(0);
+    GRID_ASSERT(0);
   }
   void AdjOp     (const Field &in, Field &out){
     _Mat.Mdag(in,out);
-    assert(0);
+    GRID_ASSERT(0);
   }
   void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
     HermOp(in,out);
@@ -188,13 +221,13 @@ public:
   ShiftedHermOpLinearOperator(LinearOperatorBase<Field> &Mat,RealD shift): _Mat(Mat), _shift(shift){};
   // Support for coarsening to a multigrid
   void OpDiag (const Field &in, Field &out) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDir  (const Field &in, Field &out,int dir,int disp) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDirAll  (const Field &in, std::vector<Field> &out){
-    assert(0);
+    GRID_ASSERT(0);
   };
   void Op     (const Field &in, Field &out){
     HermOp(in,out);
@@ -276,6 +309,29 @@ public:
     _Mat.Op   (in,out);   // A in
     _Mat.AdjOp(in,tmp);   // Adag in
     out = 0.5*(_phase*out + _phaseConj*tmp);
+  }
+};
+////////////////////////////////////////////////////////////////////
+// Present any LinearOperatorBase as Hermitian: Op = AdjOp = HermOp.
+// For coarsening (CoarsenOperator applies Op) an HPD operator whose
+// Op is a factor and HermOp the product, e.g. SchurDiagMooee or MdagM.
+////////////////////////////////////////////////////////////////////
+template<class Field>
+class HermOpAdaptor : public LinearOperatorBase<Field> {
+  LinearOperatorBase<Field> &_Mat;
+public:
+  HermOpAdaptor(LinearOperatorBase<Field> &Mat): _Mat(Mat){};
+  void OpDiag (const Field &in, Field &out)                   { GRID_ASSERT(0); }
+  void OpDir  (const Field &in, Field &out,int dir,int disp)  { GRID_ASSERT(0); }
+  void OpDirAll(const Field &in, std::vector<Field> &out)     { GRID_ASSERT(0); }
+  void Op     (const Field &in, Field &out){ _Mat.HermOp(in,out); }
+  void AdjOp  (const Field &in, Field &out){ _Mat.HermOp(in,out); }
+  void HermOp (const Field &in, Field &out){ _Mat.HermOp(in,out); }
+  void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
+    HermOp(in,out);
+    ComplexD dot = innerProduct(in,out);
+    n1=real(dot);
+    n2=norm2(out);
   }
 };
 
@@ -364,10 +420,10 @@ public:
     _Mat.Mdag(in,out);
   }
   void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
-    assert(0);
+    GRID_ASSERT(0);
   }
   void HermOp(const Field &in, Field &out){
-    assert(0);
+    GRID_ASSERT(0);
   }
 };
 template<class Matrix,class Field>
@@ -396,10 +452,10 @@ public:
     out = out + shift * in;
   }
   void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
-    assert(0);
+    GRID_ASSERT(0);
   }
   void HermOp(const Field &in, Field &out){
-    assert(0);
+    GRID_ASSERT(0);
   }
 };
 
@@ -438,13 +494,13 @@ class SchurOperatorBase :  public LinearOperatorBase<Field> {
   }
   // Support for coarsening to a multigrid
   void OpDiag (const Field &in, Field &out) {
-    assert(0); // must coarsen the unpreconditioned system
+    GRID_ASSERT(0); // must coarsen the unpreconditioned system
   }
   void OpDir  (const Field &in, Field &out,int dir,int disp) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDirAll  (const Field &in, std::vector<Field> &out){
-    assert(0);
+    GRID_ASSERT(0);
   };
 };
 template<class Matrix,class Field>
@@ -471,6 +527,17 @@ template<class Matrix,class Field>
       _Mat.MooeeDag(in,out);
       axpy(out,-1.0,tmp,out);
     }
+
+    virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+    {
+      SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+      if ( split == nullptr ) {
+        return nullptr;
+      }
+      split->Linop     = new SchurDiagMooeeOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+      split->FieldGrid = split->Matrix->RedBlackGrid();
+      return split;
+    }
 };
 template<class Matrix,class Field>
   class SchurDiagOneOperator :  public SchurOperatorBase<Field> {
@@ -496,6 +563,17 @@ template<class Matrix,class Field>
       _Mat.MooeeInvDag(tmp,out);
       _Mat.MeooeDag(out,tmp);
       axpy(out,-1.0,tmp,in);
+    }
+
+    virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+    {
+      SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+      if ( split == nullptr ) {
+        return nullptr;
+      }
+      split->Linop     = new SchurDiagOneOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+      split->FieldGrid = split->Matrix->RedBlackGrid();
+      return split;
     }
 };
 template<class Matrix,class Field>
@@ -525,6 +603,17 @@ template<class Matrix,class Field>
 
       axpy(out,-1.0,tmp,in);
     }
+
+    virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+    {
+      SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+      if ( split == nullptr ) {
+        return nullptr;
+      }
+      split->Linop     = new SchurDiagTwoOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+      split->FieldGrid = split->Matrix->RedBlackGrid();
+      return split;
+    }
 };
 
 template<class Field>
@@ -540,10 +629,10 @@ class NonHermitianSchurOperatorBase :  public LinearOperatorBase<Field>
     MpcDag(tmp,out);
   }
   virtual void HermOpAndNorm(const Field& in, Field& out, RealD& n1, RealD& n2) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   virtual void HermOp(const Field& in, Field& out) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void Op(const Field& in, Field& out) {
     Mpc(in, out);
@@ -553,13 +642,13 @@ class NonHermitianSchurOperatorBase :  public LinearOperatorBase<Field>
   }
   // Support for coarsening to a multigrid
   void OpDiag(const Field& in, Field& out) {
-    assert(0); // must coarsen the unpreconditioned system
+    GRID_ASSERT(0); // must coarsen the unpreconditioned system
   }
   void OpDir(const Field& in, Field& out, int dir, int disp) {
-    assert(0);
+    GRID_ASSERT(0);
   }
   void OpDirAll(const Field& in, std::vector<Field>& out){
-    assert(0);
+    GRID_ASSERT(0);
   };
 };
 
@@ -592,6 +681,17 @@ class NonHermitianSchurDiagMooeeOperator :  public NonHermitianSchurOperatorBase
     
     axpy(out, -1.0, tmp, out);
   }
+
+  virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+  {
+    SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+    if ( split == nullptr ) {
+      return nullptr;
+    }
+    split->Linop     = new NonHermitianSchurDiagMooeeOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+    split->FieldGrid = split->Matrix->RedBlackGrid();
+    return split;
+  }
 };
     
 template<class Matrix,class Field>
@@ -621,6 +721,17 @@ class NonHermitianSchurDiagOneOperator : public NonHermitianSchurOperatorBase<Fi
     _Mat.MeooeDag(out, tmp);
     
     axpy(out, -1.0, tmp, in);
+  }
+
+  virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+  {
+    SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+    if ( split == nullptr ) {
+      return nullptr;
+    }
+    split->Linop     = new NonHermitianSchurDiagOneOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+    split->FieldGrid = split->Matrix->RedBlackGrid();
+    return split;
   }
 };
 
@@ -653,6 +764,17 @@ class NonHermitianSchurDiagTwoOperator : public NonHermitianSchurOperatorBase<Fi
 
     axpy(out, -1.0, tmp, in);
   }
+
+  virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+  {
+    SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+    if ( split == nullptr ) {
+      return nullptr;
+    }
+    split->Linop     = new NonHermitianSchurDiagTwoOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+    split->FieldGrid = split->Matrix->RedBlackGrid();
+    return split;
+  }
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -673,7 +795,7 @@ class SchurStaggeredOperator :  public SchurOperatorBase<Field> {
  public:
   SchurStaggeredOperator (Matrix &Mat): _Mat(Mat), tmp(_Mat.RedBlackGrid()) 
   { 
-    assert( _Mat.isTrivialEE() );
+    GRID_ASSERT( _Mat.isTrivialEE() );
     mass = _Mat.Mass();
   }
   virtual void HermOpAndNorm(const Field &in, Field &out,RealD &n1,RealD &n2){
@@ -704,7 +826,18 @@ class SchurStaggeredOperator :  public SchurOperatorBase<Field> {
     Mpc(in,out);
   }
   virtual void MpcDagMpc(const Field &in, Field &out) {
-    assert(0);// Never need with staggered
+    GRID_ASSERT(0);// Never need with staggered
+  }
+
+  virtual SplitOperator<Field> *SplitClone(const Coordinate &mpi_split)
+  {
+    SplitOperator<Field> *split = SplitCloneMatrix<Field>(_Mat,mpi_split);
+    if ( split == nullptr ) {
+      return nullptr;
+    }
+    split->Linop     = new SchurStaggeredOperator<CheckerBoardedSparseMatrixBase<Field>,Field>(*split->Matrix);
+    split->FieldGrid = split->Matrix->RedBlackGrid();
+    return split;
   }
 };
 template<class Matrix,class Field> using SchurStagOperator = SchurStaggeredOperator<Matrix,Field>;
@@ -716,7 +849,7 @@ template<class Field> class OperatorFunction {
 public:
   virtual void operator() (LinearOperatorBase<Field> &Linop, const Field &in, Field &out) = 0;
   virtual void operator() (LinearOperatorBase<Field> &Linop, const std::vector<Field> &in,std::vector<Field> &out) {
-    assert(in.size()==out.size());
+    GRID_ASSERT(in.size()==out.size());
     for(int k=0;k<in.size();k++){
       (*this)(Linop,in[k],out[k]);
     }
@@ -730,13 +863,16 @@ public:
 
   virtual void operator() (const std::vector<Field> &in, std::vector<Field> &out)
   {
-    assert(in.size() == out.size());
+    GRID_ASSERT(in.size() == out.size());
 
     for (unsigned int i = 0; i < in.size(); ++i)
     {
       (*this)(in[i], out[i]);
     }
   }
+  // The identity, if a derived class says so.  A caller can then use its input
+  // where it would otherwise have materialised the output, and skip the copy.
+  virtual int isTrivial(void) { return 0; };
   virtual ~LinearFunction(){};
 };
 

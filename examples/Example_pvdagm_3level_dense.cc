@@ -82,15 +82,6 @@ Author: Peter Boyle <paboyle@ph.ed.ac.uk>
 
 #include <unordered_map>
 #include <memory>
-#include <cassert>
-
-// Upstream renamed assert -> GRID_ASSERT after this branch forked.
-#ifndef GRID_ASSERT
-#define GRID_ASSERT(x) assert(x)
-#endif
-
-// Set from --src in main; empty means "random source only".
-static std::string SrcFile;
 
 #ifdef GRID_HIP
 #include <rocsolver/rocsolver.h>
@@ -221,8 +212,8 @@ public:
   }
 };
 
-// Lüscher deflated guesser (arXiv:0706.2298 Sec A.3) for a non-Hermitian solve.
-// C_{st} = <psi[s] | LinOp | psi[t]>;  guess = sum_s c_s psi[s]  where c = C^{-1} psi† src.
+// Luscher deflated guesser (arXiv:0706.2298 Sec A.3) for a non-Hermitian solve.
+// C_{st} = <psi[s] | LinOp | psi[t]>;  guess = sum_s c_s psi[s]  where c = C^{-1} psi^dag src.
 template<class Field>
 class LuscherGuesser : public LinearFunction<Field> {
   const std::vector<Field> &psi;
@@ -713,7 +704,7 @@ void runMG(
   TrivialPrecon<LatticeFermionD>   simple_fine;
 
   //////////////////////////////////////////////////////////////////////
-  // Level 0→1: coarsen PVdagM, build LinOpCoarse
+  // Level 0->1: coarsen PVdagM, build LinOpCoarse
   //////////////////////////////////////////////////////////////////////
   LittleDiracOperator LittleDiracOpPV(geom, FGrid, Coarse5d);
   LittleDiracOpPV.CoarsenOperator(PVdagM, AggregatesPD);
@@ -729,7 +720,7 @@ void runMG(
 
   PrecGeneralisedConjugateResidualNonHermitian<CoarseVector> L2PGCR_baseline(3.0e-2,1100,LinOpCoarse,simpleC,10,10);
   L2PGCR_baseline.Level(2);
-  // L2PGCR_baseline.Name("Cbaseline");
+  L2PGCR_baseline.Name("Cbaseline");
   c_src = one;
   c_res = Zero();
   L2PGCR_baseline(c_src,c_res);
@@ -745,7 +736,7 @@ void runMG(
   // Optional sigma-ordering of psi_coarse (SVD_REORDER set): replace the crude
   // first-NB_CC slice with the NB_CC most-null directions of span(psi_coarse)
   // under LinOpCoarse.  Nullness measure = singular values (eig of the
-  // Gram-whitened Psi†A†APsi), NOT the numerical range Q†AQ which
+  // Gram-whitened Psi^dag A^dag APsi), NOT the numerical range Q^dag AQ which
   // non-normality contaminates.  The printed sigma spectrum shows where the
   // truncation cliff sits.  Unset => raw first-30 (crude GS-ordered slice).
   //////////////////////////////////////////////////////////////////////
@@ -796,7 +787,7 @@ void runMG(
   }
 
   //////////////////////////////////////////////////////////////////////
-  // Level 1→2: SUPERCOARSE aggregation using psi_coarse as subspace.
+  // Level 1->2: SUPERCOARSE aggregation using psi_coarse as subspace.
   // Maximal block {8,4,3,6}: CC = [3,6,8,8] = the dense-invertible floor.
   //
   // UNBLOCKING TRUNCATION NB_CC = 30 (first-30 slice of psi_coarse):
@@ -820,7 +811,7 @@ void runMG(
 
   typedef typename CoarseVector::vector_object                            CoarseSiteObj;
   typedef iScalar<vTComplex>                                              vTTComplex;
-  typedef GeneralCoarsenedMatrix<CoarseSiteObj,vTTComplex,NB_CC>         LittleDiracOperatorL2;
+  typedef DeprecatedGeneralCoarsenedMatrix<CoarseSiteObj,vTTComplex,NB_CC>         LittleDiracOperatorL2;
   typedef typename LittleDiracOperatorL2::CoarseVector                   CoarseCoarseVector;
   typedef Aggregation<CoarseSiteObj,vTTComplex,NB_CC>                    SubspaceL2;
   typedef MGPreconditioner<CoarseSiteObj,vTTComplex,NB_CC>               L1to2MG;
@@ -839,7 +830,7 @@ void runMG(
 
   //////////////////////////////////////////////////////////////////////
   // CC solve: DENSE (exact, non-iterative) by default; DENSE_CC=0 gives
-  // the previous iterative L3PGCR + Lüscher-guesser path for A/B.
+  // the previous iterative L3PGCR + Luscher-guesser path for A/B.
   //////////////////////////////////////////////////////////////////////
   int use_dense = 1;
   if (getenv("DENSE_CC")) use_dense = atoi(getenv("DENSE_CC"));
@@ -854,7 +845,7 @@ void runMG(
 
   PrecGeneralisedConjugateResidualNonHermitian<CoarseCoarseVector> L3PGCR(cc_tol,200,LinOpCC,simpleCC,16,16);
   L3PGCR.Level(3);
-  // L3PGCR.Name("CCouter");
+  L3PGCR.Name("CCouter");
 
   LinearFunction<CoarseCoarseVector> *ccSolve;
   LinearFunction<CoarseCoarseVector> *ccGuess;
@@ -868,7 +859,7 @@ void runMG(
     ccGuess = &simpleCC;      // exact solve ignores/overwrites any guess
   } else {
     ////////////////////////////////////////////////////////////////////
-    // Lüscher deflation guesser (arXiv:0706.2298 A.3) for the iterative CC
+    // Luscher deflation guesser (arXiv:0706.2298 A.3) for the iterative CC
     // solve, as in the earlier supercoarse configuration.
     ////////////////////////////////////////////////////////////////////
     psi_cc.resize(nbasis, CoarseCoarse5d);
@@ -909,7 +900,7 @@ void runMG(
   }
 
   //////////////////////////////////////////////////////////////////////
-  // Coarse-level GCR smoother for Level 1→2 V-cycle.
+  // Coarse-level GCR smoother for Level 1->2 V-cycle.
   //////////////////////////////////////////////////////////////////////
   RealD coarse_smoother_shift = 0.1;
   int   coarse_smoother_nstep = 2;
@@ -919,11 +910,11 @@ void runMG(
   ShiftedLinearOperator<CoarseVector> ShiftedLinOpCoarse(coarse_smoother_shift, LinOpCoarse);
   PrecGeneralisedConjugateResidualNonHermitian<CoarseVector> CoarseSmootherGCR(0.01,1,ShiftedLinOpCoarse,simpleC,coarse_smoother_nstep,coarse_smoother_nstep);
   CoarseSmootherGCR.Level(2);
-  // CoarseSmootherGCR.Name("Csmoother");
-  // CoarseSmootherGCR.SetZeroGuess(1);  // post-smoother slot: caller zeroes vec2 (NOT L2MGsolver: it takes the Luscher guess)
+  CoarseSmootherGCR.Name("Csmoother");
+  CoarseSmootherGCR.SetZeroGuess(1);  // post-smoother slot: caller zeroes vec2 (NOT L2MGsolver: it takes the Luscher guess)
 
   //////////////////////////////////////////////////////////////////////
-  // Level 1→2 V-cycle preconditioner.
+  // Level 1->2 V-cycle preconditioner.
   //////////////////////////////////////////////////////////////////////
   L1to2MG L1to2Precon(AggregatesL2,
                        LinOpCoarse,
@@ -942,7 +933,7 @@ void runMG(
 
   PrecGeneralisedConjugateResidualNonHermitian<CoarseVector> L2MGsolver(3.0e-2,200,LinOpCoarse,L1to2Precon,16,16);
   L2MGsolver.Level(2);
-  // L2MGsolver.Name("Couter");
+  L2MGsolver.Name("Couter");
   c_res = Zero();
   L2MGsolver(c_src,c_res);
 
@@ -958,9 +949,11 @@ void runMG(
   std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
 
   PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> SmootherGCR(0.01,1,ShiftedPVdagM,simple_fine,8,8);
-  // SmootherGCR.SetZeroGuess(1);        // pre+post smoother slots both zero their guess: saves 2 fine mults/outer
+  SmootherGCR.SetZeroGuess(1);        // pre+post smoother slots both zero their guess: saves 2 fine mults/outer
   SmootherGCR.Level(1);
-  // SmootherGCR.Name("Fsmoother");
+  SmootherGCR.Name("Fsmoother");
+
+  f_src = one;
 
   TwoLevelMG ThreeLevelPrecon(AggregatesPD,
                                PVdagM,
@@ -970,58 +963,27 @@ void runMG(
                                L2MGsolver,
                                simpleC);
 
-  // mmax = nstep = 8, matching the unpreconditioned GCR baselines in
-  // notes/field-of-values.md 9.5. Upstream used 16,16.
-  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCR(1.0e-8,1000,PVdagM,ThreeLevelPrecon,8,8);
+  PrecGeneralisedConjugateResidualNonHermitian<LatticeFermion> L1PGCR(1.0e-8,1000,PVdagM,ThreeLevelPrecon,16,16);
   L1PGCR.Level(1);
+  L1PGCR.Name("Fouter");
 
-  // Both solves reuse this hierarchy and subspace, so the source is the only difference
-  // between them; running them in separate jobs would regenerate the subspace and
-  // confound the comparison.
-  GridParallelRNG RNGsrc(FGrid); RNGsrc.SeedFixedIntegers({9,10,11,12});
-  LatticeFermionD Ftmp(FGrid);
+  f_res = Zero();
+  L1PGCR(f_src,f_res);
 
-  auto solve = [&](const std::string &tag){
-    RealD n2 = norm2(f_src);
-    PVdagM.Op(f_src,Ftmp);
-    ComplexD rq = innerProduct(f_src,Ftmp);
-    // The normalised Rayleigh quotient is the check that the source is where we think:
-    // ~1e-16 means it is still at the stagnation point after the read, O(1) means it is not.
-    std::cout << GridLogMessage << "=== " << tag << ": norm2 " << n2 << " <r,Fr> " << rq
-              << " normalised " << abs(rq)/std::sqrt(n2*norm2(Ftmp)) << std::endl;
-    f_res = Zero();
-    L1PGCR(f_src,f_res);
-    PVdagM.Op(f_res,Ftmp); Ftmp = Ftmp - f_src;
-    std::cout << GridLogMessage << "=== " << tag << ": true residual "
-              << std::sqrt(norm2(Ftmp)/n2) << std::endl;
-    PVdagM.getApplications();
-    PVdagM.clear();
-  };
-
-  if ( SrcFile.size() ) {
-    readFile(f_src,SrcFile);
-    solve("engineered source " + SrcFile);
-  }
-  gaussian(RNGsrc,f_src);
-  solve("random source");
+  std::cout << GridLogMessage << "Three-level outer solve: PVdagM operator uses:" << std::endl;
+  PVdagM.getApplications();
+  PVdagM.clear();
 }
 
 int main (int argc, char ** argv)
 {
   Grid_init(&argc,&argv);
 
-  // --config <gauge> and --src <scidac field>; everything else stays on env vars.
-  std::string configFile("ckpoint_lat.4000");
-  if ( GridCmdOptionExists(argv,argv+argc,"--config") )
-    configFile = GridCmdOptionPayload(argv,argv+argc,"--config");
-  if ( GridCmdOptionExists(argv,argv+argc,"--src") )
-    SrcFile    = GridCmdOptionPayload(argv,argv+argc,"--src");
-
-  const int Ls   = 16;
+  const int Ls   = 24;
   RealD     M5   = 1.8;
   RealD     b    = 1.5;
   RealD     c    = 0.5;
-  RealD     mass = 0.01;
+  RealD     mass = 0.00078;
   if ( getenv("MASS") ) mass = atof(getenv("MASS"));
 
   const int nbasis = 60;
@@ -1029,15 +991,14 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "Mass: " << mass << ", Ls: " << Ls << ", b=" << b << ", c=" << c << std::endl;
   std::cout << GridLogMessage << "nbasis: " << nbasis << std::endl;
 
-  Coordinate latt_default = GridDefaultLatt();
-  std::vector<int> lat_size(latt_default.begin(),latt_default.end());
+  std::vector<int> lat_size {48, 48, 48, 96};
 
   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(lat_size, GridDefaultSimd(Nd,vComplex::Nsimd()),GridDefaultMpi());
   GridRedBlackCartesian * UrbGrid = SpaceTimeGrid::makeFourDimRedBlackGrid(UGrid);
   GridCartesian         * FGrid   = SpaceTimeGrid::makeFiveDimGrid(Ls,UGrid);
   GridRedBlackCartesian * FrbGrid = SpaceTimeGrid::makeFiveDimRedBlackGrid(Ls,UGrid);
 
-  // Level 1 coarse grid: block 2^4 from fine (48×48×48×96 → 24×24×24×48, Ls=1)
+  // Level 1 coarse grid: block 2^4 from fine (48x48x48x96 -> 24x24x24x48, Ls=1)
   Coordinate clatt = lat_size;
   //  Coordinate Block1({2,2,2,2});
   //  Coordinate Block2({8,4,3,6});
@@ -1045,12 +1006,8 @@ int main (int argc, char ** argv)
   //  Coordinate Block2({8,4,2,4});
   //  Coordinate Block1({4,2,3,3}); // 144s with Fsmoother 12
   //  Coordinate Block2({4,4,2,4});
-  // 16^3x32: upstream's 3s do not divide it. {2,2,2,2} -> 8.8.8.16, then {4,4,4,8} ->
-  // 2.2.2.2 = 16 sites x nbasis 60 = 960 dense rows. Block2 {2,2,2,2} instead would
-  // leave 512 sites, 30720 rows, ~7.5 GB.
-  Coordinate Block1({2,2,2,2});
-  // Coordinate Block2({4,4,4,8});
-  Coordinate Block2({4,4,2,4});
+  Coordinate Block1({4,4,3,3}); 
+  Coordinate Block2({4,2,2,4});
   for (int d = 0; d < 4; d++) clatt[d] /= Block1[d];
   std::cout << GridLogMessage << "Level 1 coarse lattice: " << clatt << std::endl;
 
@@ -1080,7 +1037,8 @@ int main (int argc, char ** argv)
   LatticeGaugeField Umu(UGrid);
   std::cout << GridLogMessage << "Reading gauge field" << std::endl;
   FieldMetaData header;
-  NerscIO::readConfiguration(Umu,header,configFile);
+  std::string file("/ccs/home/poare/ckpoint_lat.1000");
+  NerscIO::readConfiguration(Umu,header,file);
 
   RealD b_ = 1.5;
   RealD c_ = 0.5;
@@ -1089,7 +1047,7 @@ int main (int argc, char ** argv)
 
   typedef PVdagMLinearOperator<MobiusFermionD,LatticeFermionD>        PVdagM_t;
   typedef ShiftedPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedPVdagM_t;
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis>  LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis>  LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector                           CoarseVector;
   typedef Aggregation<vSpinColourVector,vTComplex,nbasis>             Subspace;
   typedef MGPreconditioner<vSpinColourVector,vTComplex,nbasis>        TwoLevelMG;
@@ -1101,7 +1059,8 @@ int main (int argc, char ** argv)
 
   // Subspace cache: save after generation, reload on subsequent runs to skip expensive setup.
   // Set SUBSPACE_FILE to override the default path.
-  std::string subspace_file = "./subspace_nb" + std::to_string(nbasis) + ".scidac";
+  std::string subspace_file = "/lustre/orion/phy157/proj-shared/phy157_dwf/paboyle/subspace_nb"
+                              + std::to_string(nbasis) + ".scidac";
   if ( getenv("SUBSPACE_FILE") ) subspace_file = std::string(getenv("SUBSPACE_FILE"));
 
   // Check if subspace file exists (boss rank checks, result broadcast via GlobalSum).
@@ -1123,22 +1082,17 @@ int main (int argc, char ** argv)
     // and globally orthonormal -- NOT the block Orthogonalise() below, which would
     // defeat the raw-null discipline (runMG promotes the RAW subspace to build L2;
     // block-GS here -> psi_coarse = e_k).  The raw copy in runMG happens AFTER this.
-    // Disabled: this branch's Aggregation has no GlobalOrthonormalise, and its
-    // CreateSubspaceGCR only normalises each vector individually rather than
-    // orthonormalising the set. Calling it here would make the load path differ from
-    // the generate path; omitting it makes a reloaded subspace identical to the one
-    // that was saved, which is what the r0-vs-random comparison needs.
-    //    AggregatesGCR.GlobalOrthonormalise();
+    AggregatesGCR.GlobalOrthonormalise();
     //    AggregatesGCR.Orthogonalise();
-    std::cout << GridLogMessage << "Subspace loaded raw, as saved." << std::endl;
+    std::cout << GridLogMessage << "Subspace loaded, globally orthonormalised (raw block basis preserved)." << std::endl;
   } else {
     std::cout << GridLogMessage << "*** GCR subspace generation ***" << std::endl;
     AggregatesGCR.CreateSubspaceGCR(RNG5,PVdagM,nbasis);
     std::cout << GridLogMessage << "Subspace generation: PVdagM operator uses:" << std::endl;
     PVdagM.getApplications();
     PVdagM.clear();
-    // saveSubspace(AggregatesGCR.subspace, subspace_file);
-    // std::cout << GridLogMessage << "Subspace saved to: " << subspace_file << std::endl;
+    saveSubspace(AggregatesGCR.subspace, subspace_file);
+    std::cout << GridLogMessage << "Subspace saved to: " << subspace_file << std::endl;
   }
 
   runMG<nbasis,PVdagM_t,ShiftedPVdagM_t,Subspace,LittleDiracOperator,CoarseVector,TwoLevelMG>(

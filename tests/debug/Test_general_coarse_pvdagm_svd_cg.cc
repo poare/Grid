@@ -280,8 +280,7 @@ int main (int argc, char ** argv)
   LatticeGaugeField Umu(UGrid);
 
   FieldMetaData header;
-  // std::string file("ckpoint_lat.4000");
-  std::string file("/sdcc/u/poare/PETSc-Grid/ckpoint_lat.4000");
+  std::string file("ckpoint_lat.4000");
   NerscIO::readConfiguration(Umu,header,file);
   
   RealD mass=0.01;
@@ -376,10 +375,10 @@ int main (int argc, char ** argv)
     std::cout <<bl<<" "<<br<<"\t"<<innerProduct(U.subspace[bl],src)<<std::endl;
   }}
 
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperatorV;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperatorV;
   typedef LittleDiracOperatorV::CoarseVector CoarseVectorV;
   
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,2*nbasis> LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,2*nbasis> LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector CoarseVector;
 
   V.Orthogonalise();

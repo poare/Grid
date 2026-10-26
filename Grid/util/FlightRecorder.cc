@@ -29,6 +29,7 @@ Author: paboyle <paboyle@ph.ed.ac.uk>
 *************************************************************************************/
 /*  END LEGAL */
 #include <Grid/Grid.h>
+#include <cinttypes>   // PRIx64: uint64_t is unsigned long on Linux, unsigned long long on macOS
 
 NAMESPACE_BEGIN(Grid);
 ///////////////////////////////////////////////////////
@@ -47,6 +48,7 @@ int32_t  FlightRecorder::CsumLoggingCounter;
 int32_t  FlightRecorder::NormLoggingCounter;
 int32_t  FlightRecorder::ReductionLoggingCounter;
 uint64_t FlightRecorder::ErrorCounter;
+
 std::vector<double> FlightRecorder::NormLogVector;
 std::vector<double> FlightRecorder::ReductionLogVector;
 std::vector<uint64_t> FlightRecorder::CsumLogVector;
@@ -89,7 +91,7 @@ void FlightRecorder::SetLoggingMode(FlightRecorder::LoggingMode_t mode)
     Truncate();
     break;
   default:
-    assert(0);
+    GRID_ASSERT(0);
   }
 }
 bool FlightRecorder::StepLog(const char *name)
@@ -207,10 +209,8 @@ bool FlightRecorder::CsumLog(uint64_t hex)
         std::cerr<<"FlightRecorder::CsumLog Oops, I did it again "<< CsumLoggingCounter
 		 <<std::hex<<" "<<hex<<" "<<hexref<<std::dec<<std::endl;
 
-	fprintf(stderr,"%s:%d Oops, I did it again! Reproduce failure for csum %d %lx expect %lx\n",
-		GridHostname(),
-		GlobalSharedMemory::WorldShmRank,
-		CsumLoggingCounter,hex, hexref);
+	fprintf(stderr,"%s:%d Oops, I did it again! Reproduce failure for csum %d %" PRIx64 " expect %" PRIx64 "\n",
+		GridHostname(),GlobalSharedMemory::WorldShmRank,CsumLoggingCounter,(uint64_t)(hex),(uint64_t)(hexref));
 	BACKTRACEFP(stderr);
 	fflush(stderr);
 
@@ -260,7 +260,7 @@ void FlightRecorder::ReductionLog(double local,double global)
 		global, local, ReductionLogVector[ReductionLoggingCounter]); fflush(stderr);
 	BACKTRACEFP(stderr);
 	
-	if ( !ContinueOnFail ) assert(0);
+	if ( !ContinueOnFail ) GRID_ASSERT(0);
 
 	ErrorCounter++;
       } else {
@@ -301,14 +301,11 @@ void FlightRecorder::xmitLog(void *buf,uint64_t bytes)
 	fprintf(stderr,"FlightRecorder Oops step %d stage %s \n",
 		FlightRecorder::StepLoggingCounter,
 		FlightRecorder::StepName);
-	fprintf(stderr,"%s:%d Oops, send buf difference! Reproduce failure for xmit %d/%zu  %lx expect glb %lx\n",
-		GridHostname(),
-		GlobalSharedMemory::WorldShmRank,
-		XmitLoggingCounter,XmitLogVector.size(),
-		_xor, XmitLogVector[XmitLoggingCounter]); fflush(stderr);
+	fprintf(stderr,"%s:%d Oops, send buf difference! Reproduce failure for xmit %d/%zu  %" PRIx64 " expect glb %" PRIx64 "\n",
+		GridHostname(),GlobalSharedMemory::WorldShmRank,XmitLoggingCounter,XmitLogVector.size(),(uint64_t)(_xor),(uint64_t)(XmitLogVector[XmitLoggingCounter])); fflush(stderr);
 	BACKTRACEFP(stderr);
 	
-	if ( !ContinueOnFail ) assert(0);
+	if ( !ContinueOnFail ) GRID_ASSERT(0);
 
 	ErrorCounter++;
       } else {
@@ -347,14 +344,11 @@ void FlightRecorder::recvLog(void *buf,uint64_t bytes,int rank)
 	fprintf(stderr,"FlightRecorder Oops step %d stage %s \n",
 		FlightRecorder::StepLoggingCounter,
 		FlightRecorder::StepName);
-	fprintf(stderr,"%s:%d Oops, recv buf difference! Reproduce failure for recv %d/%zu  %lx expect glb %lx from MPI rank %d\n",
-		GridHostname(),
-		GlobalSharedMemory::WorldShmRank,
-		RecvLoggingCounter,RecvLogVector.size(),
-		_xor, RecvLogVector[RecvLoggingCounter],rank); fflush(stderr);
+	fprintf(stderr,"%s:%d Oops, recv buf difference! Reproduce failure for recv %d/%zu  %" PRIx64 " expect glb %" PRIx64 " from MPI rank %d\n",
+		GridHostname(),GlobalSharedMemory::WorldShmRank,RecvLoggingCounter,RecvLogVector.size(),(uint64_t)(_xor),(uint64_t)(RecvLogVector[RecvLoggingCounter]),rank); fflush(stderr);
 	BACKTRACEFP(stderr);
 	
-	if ( !ContinueOnFail ) assert(0);
+	if ( !ContinueOnFail ) GRID_ASSERT(0);
 
 	ErrorCounter++;
       } else {
@@ -379,8 +373,12 @@ std::vector<ViewLogger::Entry_t> ViewLogger::LogVector;
 
 void ViewLogger::Begin() { Enabled = true; LogVector.resize(0); }
 void ViewLogger::End() { Enabled = false; }
-
-void ViewLogger::Log(const char* filename, int line, int index, int mode, void* data, uint64_t bytes)
+#ifdef GRID_LOG_VIEWS_FENCEPOST
+void ViewLogger::LogOpen(const char* filename, int line, int index, int mode, void* data, uint64_t bytes)
+{
+  ViewLogger::LogClose(filename,line,index,mode,data,bytes);
+}
+void ViewLogger::LogClose(const char* filename, int line, int index, int mode, void* data, uint64_t bytes)
 {
   if (!Enabled)
    return;
@@ -416,6 +414,27 @@ void ViewLogger::Log(const char* filename, int line, int index, int mode, void* 
     }
   }
 }
+#else
+void ViewLogger::LogOpen(const char* filename, int line, int index, int mode, void* data, uint64_t bytes){ }
+void ViewLogger::LogClose(const char* filename, int line, int index, int mode, void* data, uint64_t bytes)
+{
+  if (!Enabled)
+   return;
+
+  if (bytes < sizeof(uint64_t)) return;
+   
+#ifdef GRID_SYCL
+  uint64_t *u_data = (uint64_t *)data;
+  switch (mode) {
+    case AcceleratorWrite:
+    case AcceleratorWriteDiscard:
+      uint64_t csum = checksum_gpu(u_data,bytes/sizeof(uint64_t));
+      FlightRecorder::CsumLog(csum);
+      break;
+  }
+#endif
+}
+#endif
 
 #endif
 

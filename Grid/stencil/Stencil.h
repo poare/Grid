@@ -82,7 +82,7 @@ void DslashLogPartial(void);
 void DslashLogDirichlet(void);
 
 struct StencilEntry {
-#ifdef GRID_CUDA
+#if defined(GRID_CUDA) || defined(GRID_HIP)
   uint64_t _byte_offset;       // 8 bytes
   uint32_t _offset;            // 4 bytes
 #else
@@ -277,7 +277,7 @@ protected:
     device_heap_bytes+= bytes;
     if ( device_heap_bytes > device_heap_size ) {
       std::cout << "DeviceBufferMalloc overflow bytes "<<bytes<<" heap bytes "<<device_heap_bytes<<" heap size "<<device_heap_size<<std::endl;
-      assert (device_heap_bytes <= device_heap_size);
+      GRID_ASSERT (device_heap_bytes <= device_heap_size);
     }
     return ptr;
   }
@@ -314,6 +314,32 @@ public:
     return accessor;
   }
 
+  int              traceID;
+  // Delivered-comms instrumentation, per CommunicateBegin/Complete pair.
+  //
+  // OffNodeBytes : bytes handed to MPI, i.e. EXCLUDING intranode traffic --
+  //   StencilSendToRecvFrom* return off-node bytes only, which is the
+  //   differentiation we want.  It is BIDIRECTIONAL (send + receive) under
+  //   ACCELERATOR_AWARE_MPI (Communicator_mpi3.cc:463,481).  On the
+  //   host-staged path the send is deferred to PollDtoH and its bytes are
+  //   NOT currently counted, so figures from the two paths are not
+  //   comparable.  Prepare() returns 0.0 on the accelerator-aware path.
+  //
+  // CommTimer : microseconds between traceStart and traceStop, i.e. exactly
+  //   the "Stencil::CommunicateBegin" roctx range -- transfer only, with the
+  //   StencilBarrier and the compress kernels already excluded.  It spans the
+  //   window in which the interior kernel runs, so the derived rate is
+  //   bandwidth delivered CONCURRENT WITH COMPUTE, which is the quantity a
+  //   comms-only benchmark cannot see.
+  //
+  // InterNodeBandwidthMBps : the per-call rate.  For a reportable figure
+  //   accumulate bytes and time separately across calls and divide once --
+  //   averaging per-call rates over-weights the fast calls.  See
+  //   benchmarks/Benchmark_dwf.cc.
+  double           OffNodeBytes;
+  double           CommTimer;
+  double           InterNodeBandwidthMBps;
+  
   int face_table_computed;
   //  int partialDirichlet;
   int fullDirichlet;
@@ -390,7 +416,7 @@ public:
     else                nbr_proc = pd-1;
 
     // FIXME  this logic needs to be sorted for three link term
-    //    assert( (displacement==1) || (displacement==-1));
+    //    GRID_ASSERT( (displacement==1) || (displacement==-1));
     // Present hack only works for >= 4^4 subvol per node
     _grid->ShiftedRanks(dimension,nbr_proc,xmit_to_rank,recv_from_rank);
 
@@ -427,9 +453,19 @@ public:
 	double *dbuf =(double *) packet.recv_buf;
 	float  *fbuf =(float  *) packet.compressed_recv_buf;
 
+	// The lane index is a GPU coalescing optimisation: lane = threadIdx.y
+	// puts adjacent threads on adjacent words.  On a CPU build there are no
+	// SIMT lanes and acceleratorSIMTlane() is identically zero, so the plain
+	// form would convert only 1 word of every nsimd; the #else covers all
+	// lanes explicitly.
 	accelerator_forNB(ss,outer,nsimd,{
+#ifdef GRID_SIMT
 	  int lane = acceleratorSIMTlane(nsimd);
 	  dbuf[ss*nsimd+lane] = fbuf[ss*nsimd+lane]; //conversion
+#else
+	  for(int lane=0;lane<nsimd;lane++)
+	    dbuf[ss*nsimd+lane] = fbuf[ss*nsimd+lane]; //conversion
+#endif
 	});
 
       } else if ( sizeof(word)==4){
@@ -441,8 +477,13 @@ public:
 	uint16_t *hbuf =(uint16_t *) packet.compressed_recv_buf;
 
 	accelerator_forNB(ss,outer,nsimd,{
+#ifdef GRID_SIMT
 	  int lane = acceleratorSIMTlane(nsimd);
 	  fbuf[ss*nsimd+lane] = ((uint32_t)hbuf[ss*nsimd+lane])<<16; //copy back and pad each word with zeroes
+#else
+	  for(int lane=0;lane<nsimd;lane++)
+	    fbuf[ss*nsimd+lane] = ((uint32_t)hbuf[ss*nsimd+lane])<<16; //copy back and pad each word with zeroes
+#endif
 	});
 
       } else {
@@ -489,9 +530,15 @@ public:
 	double *dbuf =(double *) packet.send_buf;
 	float  *fbuf =(float  *) packet.compressed_send_buf;
 
+	// CPU lane coverage as in DecompressPacket.
 	accelerator_forNB(ss,outer,nsimd,{
+#ifdef GRID_SIMT
 	  int lane = acceleratorSIMTlane(nsimd);
 	  fbuf[ss*nsimd+lane] = dbuf[ss*nsimd+lane]; // convert fp64 to fp32
+#else
+	  for(int lane=0;lane<nsimd;lane++)
+	    fbuf[ss*nsimd+lane] = dbuf[ss*nsimd+lane]; // convert fp64 to fp32
+#endif
 	});
 
       } else if ( sizeof(word)==4){
@@ -500,8 +547,13 @@ public:
 	uint16_t *hbuf =(uint16_t *) packet.compressed_send_buf;
 	
 	accelerator_forNB(ss,outer,nsimd,{
+#ifdef GRID_SIMT
 	  int lane = acceleratorSIMTlane(nsimd);
 	  hbuf[ss*nsimd+lane] = fbuf[ss*nsimd+lane]>>16; // convert as in Bagel/BFM ; bfloat16 ; s7e8 Intel patent
+#else
+	  for(int lane=0;lane<nsimd;lane++)
+	    hbuf[ss*nsimd+lane] = fbuf[ss*nsimd+lane]>>16; // convert as in Bagel/BFM ; bfloat16 ; s7e8 Intel patent
+#endif
 	});
 
       } else {
@@ -537,11 +589,13 @@ public:
       _grid->StencilBarrier(); 
 #endif
     }
-    
+    traceID = traceStart("Stencil Communicate");
+    OffNodeBytes=0;
+    CommTimer=-usecond();
     for(int i=0;i<Packets.size();i++){
       //      std::cout << "Communicate prepare "<<i<<std::endl;
       //      _grid->Barrier();
-      _grid->StencilSendToRecvFromPrepare(MpiReqs,
+      OffNodeBytes+=_grid->StencilSendToRecvFromPrepare(MpiReqs,
 					  Packets[i].compressed_send_buf,
 					  Packets[i].to_rank,Packets[i].do_send,
 					  Packets[i].compressed_recv_buf,
@@ -558,7 +612,7 @@ public:
     for(int i=0;i<Packets.size();i++){
       //      std::cout << "Communicate Begin "<<i<<std::endl;
       //      _grid->Barrier();
-      _grid->StencilSendToRecvFromBegin(MpiReqs,
+      OffNodeBytes+=_grid->StencilSendToRecvFromBegin(MpiReqs,
 					Packets[i].send_buf,Packets[i].compressed_send_buf,
 					Packets[i].to_rank,Packets[i].do_send,
 					Packets[i].recv_buf,Packets[i].compressed_recv_buf,
@@ -588,6 +642,10 @@ public:
     //    _grid->Barrier();
     _grid->StencilSendToRecvFromComplete(MpiReqs,0); // MPI is done
     //    if   ( this->partialDirichlet ) DslashLogPartial();
+    traceStop(traceID);
+    CommTimer+=usecond();
+    InterNodeBandwidthMBps = OffNodeBytes/CommTimer;
+    
     if ( this->fullDirichlet ) DslashLogDirichlet();
     else DslashLogFull();
     //    acceleratorCopySynchronise();// is in the StencilSendToRecvFromComplete
@@ -633,7 +691,7 @@ public:
     // Map to always positive shift modulo global full dimension.
     int shift = (displacement+fd)%fd;
 
-    assert (source.Checkerboard()== this->_checkerboard);
+    GRID_ASSERT (source.Checkerboard()== this->_checkerboard);
 
     // the permute type
     int simd_layout     = _grid->_simd_layout[dimension];
@@ -680,7 +738,7 @@ public:
     //////////////////////////////////
     _grid->StencilBarrier();// Synch shared memory on a single nodes
 
-    assert(source.Grid()==_grid);
+    GRID_ASSERT(source.Grid()==_grid);
 
     u_comm_offset=0;
 
@@ -697,7 +755,7 @@ public:
     // Or issue barrier AFTER the DMA is running
 #endif    
     face_table_computed=1;
-    assert(u_comm_offset==_unified_buffer_size);
+    GRID_ASSERT(u_comm_offset==_unified_buffer_size);
   }
 
   /////////////////////////
@@ -751,7 +809,7 @@ public:
     obj.xbytes      = xbytes;
     obj.rbytes      = rbytes;
     obj.cb          = cb;
-
+    
     for(int i=0;i<CachedTransfers.size();i++){
       if (   (CachedTransfers[i].direction  ==direction)
 	   &&(CachedTransfers[i].OrthogPlane==OrthogPlane)
@@ -763,11 +821,13 @@ public:
 	     ){
 	// FIXME worry about duplicate with partial compression
 	// Wont happen as DWF has no duplicates, but...
-	AddCopy(CachedTransfers[i].recv_buf,recv_buf,rbytes);
-	return 1;
+	//	AddCopy(CachedTransfers[i].recv_buf,recv_buf,rbytes);
+	//	std::cout << "Duplicate dir " <<direction<<" "<<" OrthogPlane "<<OrthogPlane<<" Dest"<<DestProc <<" xbytes " <<xbytes<<" lane "<< lane<<" cb "<<cb<<std::endl;
+	return 0;
+	
+	//	return 1;
       }
     }
-
     CachedTransfers.push_back(obj);
     return 0;
   }
@@ -812,8 +872,8 @@ public:
     CommsMerge(decompress,Mergers,Decompressions);
   }
   template<class decompressor>  void CommsMergeSHM(decompressor decompress) {
-    assert(MergersSHM.size()==0);
-    assert(DecompressionsSHM.size()==0);
+    GRID_ASSERT(MergersSHM.size()==0);
+    GRID_ASSERT(DecompressionsSHM.size()==0);
   }
 
   template<class decompressor>
@@ -942,6 +1002,12 @@ public:
 		   bool preserve_shm=false)
   {
     SloppyComms = 0;
+    // Never leave the delivered-comms counters uninitialised: they are read
+    // from outside (benchmarks, drivers) and a stencil that has not yet
+    // exchanged would otherwise return denormal garbage.
+    OffNodeBytes           = 0;
+    CommTimer              = 0;
+    InterNodeBandwidthMBps = 0;
     face_table_computed=0;
     _grid    = grid;
     this->parameters=p;
@@ -1003,7 +1069,7 @@ public:
       int splice_dim      = _grid->_simd_layout[dimension]>1 && (comm_dim);
       int rotate_dim      = _grid->_simd_layout[dimension]>2;
 
-      assert ( (rotate_dim && comm_dim) == false) ; // Do not think spread out is supported
+      GRID_ASSERT ( (rotate_dim && comm_dim) == false) ; // Do not think spread out is supported
 
       int sshift[2];
       //////////////////////////
@@ -1117,10 +1183,10 @@ public:
     int simd_layout     = _grid->_simd_layout[dimension];
     int comm_dim        = _grid->_processors[dimension] >1 ;
 
-    assert(comm_dim==1);
+    GRID_ASSERT(comm_dim==1);
     int shift = (shiftpm + fd) %fd;
-    assert(shift>=0);
-    assert(shift<fd);
+    GRID_ASSERT(shift>=0);
+    GRID_ASSERT(shift<fd);
 
     // done in reduced dims, so SIMD factored
     int buffer_size = _grid->_slice_nblock[dimension]*_grid->_slice_block[dimension];
@@ -1301,7 +1367,7 @@ public:
     //    int comms_partial_send   = this->_comms_partial_send[point] ;
     //    int comms_partial_recv   = this->_comms_partial_recv[point] ;
     
-    assert(rhs.Grid()==_grid);
+    GRID_ASSERT(rhs.Grid()==_grid);
     //	  conformable(_grid,rhs.Grid());
 
     int fd              = _grid->_fdimensions[dimension];
@@ -1309,10 +1375,10 @@ public:
     int pd              = _grid->_processors[dimension];
     int simd_layout     = _grid->_simd_layout[dimension];
     int comm_dim        = _grid->_processors[dimension] >1 ;
-    assert(simd_layout==1);
-    assert(comm_dim==1);
-    assert(shift>=0);
-    assert(shift<fd);
+    GRID_ASSERT(simd_layout==1);
+    GRID_ASSERT(comm_dim==1);
+    GRID_ASSERT(shift>=0);
+    GRID_ASSERT(shift<fd);
 
     int buffer_size = _grid->_slice_nblock[dimension]*_grid->_slice_block[dimension];
 
@@ -1450,11 +1516,11 @@ public:
     int pd              = _grid->_processors[dimension];
     int simd_layout     = _grid->_simd_layout[dimension];
     int comm_dim        = _grid->_processors[dimension] >1 ;
-    assert(comm_dim==1);
+    GRID_ASSERT(comm_dim==1);
     // This will not work with a rotate dim
-    assert(simd_layout==maxl);
-    assert(shift>=0);
-    assert(shift<fd);
+    GRID_ASSERT(simd_layout==maxl);
+    GRID_ASSERT(shift>=0);
+    GRID_ASSERT(shift<fd);
 
 
     int permute_type=_grid->PermuteType(dimension);
@@ -1465,8 +1531,8 @@ public:
     int buffer_size = _grid->_slice_nblock[dimension]*_grid->_slice_block[dimension];
     //    int words = sizeof(cobj)/sizeof(vector_type);
 
-    assert(cbmask==0x3); // Fixme think there is a latent bug if not true
-                         // This assert will trap it if ever hit. Not hit normally so far
+    GRID_ASSERT(cbmask==0x3); // Fixme think there is a latent bug if not true
+                         // This GRID_ASSERT will trap it if ever hit. Not hit normally so far
     int reduced_buffer_size = buffer_size;
     if (cbmask != 0x3) reduced_buffer_size=buffer_size>>1;
 
@@ -1477,7 +1543,7 @@ public:
     int xbytes; 
     int rbytes; 
     
-    assert(bytes*simd_layout == reduced_buffer_size*datum_bytes);
+    GRID_ASSERT(bytes*simd_layout == reduced_buffer_size*datum_bytes);
 
     std::vector<cobj *> rpointers(maxl);
     std::vector<cobj *> spointers(maxl);
@@ -1550,7 +1616,7 @@ public:
 	  int nbr_ox   = (nbr_lcoor%rd);      // outer coord of peer "x"
 
 	  int nbr_plane = nbr_ic;
-	  assert (sx == nbr_ox);
+	  GRID_ASSERT (sx == nbr_ox);
 
 	  auto rp = &u_simd_recv_buf[i        ][comm_off];
 	  auto sp = &u_simd_send_buf[nbr_plane][comm_off];

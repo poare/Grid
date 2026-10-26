@@ -38,6 +38,7 @@ Author: Peter Boyle <paboyle@ph.ed.ac.uk>
 NAMESPACE_BEGIN(Grid);
 
 extern bool Stencil_force_mpi ;
+extern bool Stencil_force_barrier ;
 
 class CartesianCommunicator : public SharedMemory {
 
@@ -108,7 +109,7 @@ public:
   // very VERY rarely (Log, serial RNG) we need world without a grid
   ////////////////////////////////////////////////////////////////////////////////
   static int  RankWorld(void) ;
-  static void BroadcastWorld(int root,void* data, int bytes);
+  static void BroadcastWorld(int root,void* data, uint64_t bytes);
   static void BarrierWorld(void);
   
   ////////////////////////////////////////////////////////////
@@ -132,6 +133,7 @@ public:
 
   template<class obj> void GlobalSumP2P(obj &o)
   {
+    GRID_TRACE("GlobalSumP2P");
     std::vector<obj> column;
     obj accum = o;
     int source,dest;
@@ -149,7 +151,7 @@ public:
 			    sizeof(obj),d*100+p);
 
       }
-      if (!list.empty()) // avoid triggering assert in comms == none
+      if (!list.empty()) // avoid triggering GRID_ASSERT in comms == none
 	CommsComplete(list);
       for(int p=1;p<_processors[d];p++){
 	accum = accum + column[p];
@@ -175,27 +177,27 @@ public:
 			   int dest,
 			   void *recv,
 			   int from,
-			   int bytes,int dir);
+			   uint64_t bytes,int dir);
   
   void SendToRecvFrom(void *xmit,
 		      int xmit_to_rank,
 		      void *recv,
 		      int recv_from_rank,
-		      int bytes);
+		      uint64_t bytes);
   
   int IsOffNode(int rank);
   double StencilSendToRecvFrom(void *xmit,
 			       int xmit_to_rank,int do_xmit,
 			       void *recv,
 			       int recv_from_rank,int do_recv,
-			       int bytes,int dir);
+			       uint64_t bytes,int dir);
 
   double StencilSendToRecvFromPrepare(std::vector<CommsRequest_t> &list,
 				      void *xmit,
 				      int xmit_to_rank,int do_xmit,
 				      void *recv,
 				      int recv_from_rank,int do_recv,
-				      int xbytes,int rbytes,int dir);
+				      uint64_t xbytes,uint64_t rbytes,int dir);
 
   // Could do a PollHtoD and have a CommsMerge dependence
   void StencilSendToRecvFromPollDtoH (std::vector<CommsRequest_t> &list);
@@ -206,7 +208,7 @@ public:
 				    int xmit_to_rank,int do_xmit,
 				    void *recv,void *recv_comp,
 				    int recv_from_rank,int do_recv,
-				    int xbytes,int rbytes,int dir);
+				    uint64_t xbytes,uint64_t rbytes,int dir);
   
   
   void StencilSendToRecvFromComplete(std::vector<CommsRequest_t> &waitall,int i);
@@ -220,24 +222,51 @@ public:
   ////////////////////////////////////////////////////////////
   // Broadcast a buffer and composite larger
   ////////////////////////////////////////////////////////////
-  void Broadcast(int root,void* data, int bytes);
+  void Broadcast(int root,void* data, uint64_t bytes);
 
   ////////////////////////////////////////////////////////////
   // All2All down one dimension
   ////////////////////////////////////////////////////////////
   template<class T> void AllToAll(int dim,std::vector<T> &in, std::vector<T> &out){
-    assert(dim>=0);
-    assert(dim<_ndimension);
-    assert(in.size()==out.size());
+    GRID_ASSERT(dim>=0);
+    GRID_ASSERT(dim<_ndimension);
+    GRID_ASSERT(in.size()==out.size());
     int numnode = _processors[dim];
     uint64_t bytes=sizeof(T);
     uint64_t words=in.size()/numnode;
-    assert(numnode * words == in.size());
-    assert(words < (1ULL<<31));
+    GRID_ASSERT(numnode * words == in.size());
+    GRID_ASSERT(words < (1ULL<<31));
     AllToAll(dim,(void *)&in[0],(void *)&out[0],words,bytes);
   }
   void AllToAll(int dim  ,void *in,void *out,uint64_t words,uint64_t bytes);
   void AllToAll(void  *in,void *out,uint64_t words         ,uint64_t bytes);
+
+  ////////////////////////////////////////////////////////////////////////////
+  // Variable count all to all. Counts and displacements are in units of
+  // "bytes" sized words and are indexed by rank within this communicator.
+  // For exchanges that are a permutation but do not divide evenly between
+  // ranks; AllToAll above is the uniform count special case.
+  ////////////////////////////////////////////////////////////////////////////
+  void AllToAllV(void *in ,const std::vector<int> &sendcounts,const std::vector<int> &senddispls,
+                 void *out,const std::vector<int> &recvcounts,const std::vector<int> &recvdispls,
+                 uint64_t bytes);
+
+  ////////////////////////////////////////////////////////////////////////////
+  // Gather to all. Every rank contributes sendcount words from "in"; every
+  // rank receives the concatenation of all contributions in rank order.
+  // Counts and displacements are in units of "bytes" sized words and are
+  // indexed by rank within this communicator; recvcounts[ThisRank()] must
+  // equal sendcount.  AllGather below is the uniform count special case.
+  //
+  // This is the primitive form of the zero-fill + GlobalSumVector idiom used
+  // wherever each element of the result has exactly one contributing rank.
+  // That idiom moves the payload twice and reduces over zeros; this moves it
+  // once and performs no arithmetic.
+  ////////////////////////////////////////////////////////////////////////////
+  void AllGatherV(void *in ,int sendcount,
+                  void *out,const std::vector<int> &recvcounts,const std::vector<int> &recvdispls,
+                  uint64_t bytes);
+  void AllGather (void *in ,void *out,uint64_t words,uint64_t bytes);
   
   template<class obj> void Broadcast(int root,obj &data)
   {

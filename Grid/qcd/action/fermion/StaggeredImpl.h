@@ -168,12 +168,21 @@ public:
   }   
       
   inline void InsertForce5D(GaugeField &mat, FermionField &Btilde, FermionField &Atilde,int mu){
-    assert (0); 
+    GRID_ASSERT (0); 
     // Must never hit
   }
 };
 typedef StaggeredImpl<vComplex,  FundamentalRepresentation > StaggeredImplR;   // Real.. whichever prec
 typedef StaggeredImpl<vComplexF, FundamentalRepresentation > StaggeredImplF;  // Float
 typedef StaggeredImpl<vComplexD, FundamentalRepresentation > StaggeredImplD;  // Double
+
+/////////////////////////////////////////////////////////////////////////////
+// Lexicographic staggered implementations
+/////////////////////////////////////////////////////////////////////////////
+typedef StaggeredImpl<sComplexF, FundamentalRepresentation > lexStaggeredImplF;
+typedef StaggeredImpl<sComplexD, FundamentalRepresentation > lexStaggeredImplD;
+/////////////////////////////////////////////////////////////////////////////
+// End lexicographic staggered implementations
+/////////////////////////////////////////////////////////////////////////////
 
 NAMESPACE_END(Grid);

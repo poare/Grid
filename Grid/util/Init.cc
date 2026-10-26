@@ -85,6 +85,8 @@ feenableexcept (unsigned int excepts)
 #define HOST_NAME_MAX _POSIX_HOST_NAME_MAX
 #endif
 
+void * Grid_backtrace_buffer[_NBACKTRACE];
+
 NAMESPACE_BEGIN(Grid);
 
 //////////////////////////////////////////////////////
@@ -93,6 +95,8 @@ NAMESPACE_BEGIN(Grid);
 //////////////////////////////////////////////////////
 static Coordinate Grid_default_latt;
 static Coordinate Grid_default_mpi;
+static Coordinate Grid_default_batched_solver_split;
+static bool       Grid_default_batched_solver_split_node = false;
 
 int GridThread::_threads =1;
 int GridThread::_hyperthreads=1;
@@ -106,6 +110,8 @@ char *GridHostname(void)
 }
 const Coordinate &GridDefaultLatt(void)     {return Grid_default_latt;};
 const Coordinate &GridDefaultMpi(void)      {return Grid_default_mpi;};
+const Coordinate &GridDefaultBatchedSolverSplit(void)     {return Grid_default_batched_solver_split;};
+bool              GridDefaultBatchedSolverSplitNode(void) {return Grid_default_batched_solver_split_node;};
 const Coordinate GridDefaultSimd(int dims,int nsimd)
 {
   Coordinate layout(dims);
@@ -118,7 +124,7 @@ const Coordinate GridDefaultSimd(int dims,int nsimd)
       layout[d]=1;
     }
   }
-  assert(nn==1);
+  GRID_ASSERT(nn==1);
   return layout;
 }
 
@@ -213,14 +219,14 @@ void GridParseLayout(char **argv,int argc,
 #endif
     arg= GridCmdOptionPayload(argv,argv+argc,"--threads");
     GridCmdOptionIntVector(arg,ompthreads);
-    assert(ompthreads.size()==1);
+    GRID_ASSERT(ompthreads.size()==1);
     GridThread::SetThreads(ompthreads[0]);
   }
   if( GridCmdOptionExists(argv,argv+argc,"--accelerator-threads") ){
     std::vector<int> gputhreads(0);
     arg= GridCmdOptionPayload(argv,argv+argc,"--accelerator-threads");
     GridCmdOptionIntVector(arg,gputhreads);
-    assert(gputhreads.size()==1);
+    GRID_ASSERT(gputhreads.size()==1);
     acceleratorThreads(gputhreads[0]);
   }
 
@@ -232,7 +238,7 @@ void GridParseLayout(char **argv,int argc,
   }
   // Copy back into coordinate format
   int nd = mpi.size();
-  assert(latt.size()==nd);
+  GRID_ASSERT(latt.size()==nd);
   latt_c.resize(nd);
    mpi_c.resize(nd);
   for(int d=0;d<nd;d++){
@@ -315,8 +321,8 @@ std::vector<dlRegion> dlMap;
 
 void Grid_init(int *argc,char ***argv)
 {
-
-  assert(Grid_is_initialised == 0);
+  
+  GRID_ASSERT(Grid_is_initialised == 0);
 
   GridLogger::GlobalStopWatch.Start();
 
@@ -341,7 +347,11 @@ void Grid_init(int *argc,char ***argv)
     GridCmdOptionInt(arg,forcempi);
     Stencil_force_mpi = (bool)forcempi;
   }
-  
+
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--shm-barrier-force") ){
+    Stencil_force_barrier = true;
+  }
+
   if( GridCmdOptionExists(*argv,*argv+*argc,"--device-mem") ){
     int MB;
     arg= GridCmdOptionPayload(*argv,*argv+*argc,"--device-mem");
@@ -359,24 +369,6 @@ void Grid_init(int *argc,char ***argv)
 
   if( GridCmdOptionExists(*argv,*argv+*argc,"--shm-hugepages") ){
     GlobalSharedMemory::Hugepages = 1;
-  }
-
-
-  if( GridCmdOptionExists(*argv,*argv+*argc,"--debug-signals") ){
-    Grid_debug_handler_init();
-  }
-  // Sleep n-seconds at end of handler
-  if( GridCmdOptionExists(*argv,*argv+*argc,"--signal-delay") ){
-    arg= GridCmdOptionPayload(*argv,*argv+*argc,"--signal-delay");
-    GridCmdOptionInt(arg,signal_delay);
-  }
-  // periodic wakeup with stack trace printed
-  if( GridCmdOptionExists(*argv,*argv+*argc,"--debug-heartbeat") ){
-    Grid_debug_heartbeat();
-  }
-  // periodic wakeup with empty handler (interrupts some system calls)
-  if( GridCmdOptionExists(*argv,*argv+*argc,"--heartbeat") ){
-    Grid_heartbeat();
   }
 
 #if defined(A64FX)
@@ -418,7 +410,7 @@ void Grid_init(int *argc,char ***argv)
     std::ostringstream fname;
 
     int rank = CartesianCommunicator::RankWorld();
-    int radix=64;
+    int radix=32;
     char* root = getenv("GRID_STDOUT_ROOT");
     if (root) {
       fname << root ;
@@ -430,8 +422,11 @@ void Grid_init(int *argc,char ***argv)
     fname << "/";
     fname<<"Grid.stdout.";
     fname<<CartesianCommunicator::RankWorld();
+
+    std::cout << " Reconnecting stdout to "<<fname.str()<<std::endl;
+    
     fp=freopen(fname.str().c_str(),"w",stdout);
-    assert(fp!=(FILE *)NULL);
+    GRID_ASSERT(fp!=(FILE *)NULL);
 
     std::ostringstream ename;
     if (root){
@@ -440,12 +435,14 @@ void Grid_init(int *argc,char ***argv)
     ename << (rank/radix)*radix << "/";
     ename<<"Grid.stderr.";
     ename<<CartesianCommunicator::RankWorld();
+    std::cout << " Reconnecting stderr to "<<ename.str()<<std::endl;
     fp=freopen(ename.str().c_str(),"w",stderr);
-    assert(fp!=(FILE *)NULL);
+    GRID_ASSERT(fp!=(FILE *)NULL);
   }
   fileno_stdout = fileno(stdout);
   fileno_stderr = fileno(stderr) ;
-    
+  dup2(fileno_stdout, STDOUT_FILENO);
+  dup2(fileno_stderr, STDERR_FILENO);
   ////////////////////////////////////////////////////
   // OK to use GridLogMessage etc from here on
   ////////////////////////////////////////////////////
@@ -549,6 +546,7 @@ void Grid_init(int *argc,char ***argv)
     std::cout<<GridLogMessage<<"  --shm  M        : allocate M megabytes of shared memory for comms"<<std::endl;
     std::cout<<GridLogMessage<<"  --shm-mpi 0|1   : Force MPI usage under multi-rank per node "<<std::endl;
     std::cout<<GridLogMessage<<"  --shm-hugepages : use explicit huge pages in mmap call "<<std::endl;
+    std::cout<<GridLogMessage<<"  --shm-barrier-force : keep the node barrier in the halo exchange under --shm-mpi 1 (only orders shared memory PUT/GET, redundant otherwise)"<<std::endl;
     std::cout<<GridLogMessage<<"  --device-mem M  : Size of device software cache for lattice fields (MB) "<<std::endl;
     std::cout<<GridLogMessage<<std::endl;
     std::cout<<GridLogMessage<<"Verbose:"<<std::endl;
@@ -568,6 +566,7 @@ void Grid_init(int *argc,char ***argv)
     std::cout<<GridLogMessage<<"Performance:"<<std::endl;
     std::cout<<GridLogMessage<<std::endl;
     std::cout<<GridLogMessage<<"  --comms-overlap    : Overlap comms with compute "<<std::endl;    
+    std::cout<<GridLogMessage<<"  --batched-solver-split a.b.c.d|node : batched solvers run independent solves on partitions of this MPI layout (node = one per node)"<<std::endl;
     std::cout<<GridLogMessage<<std::endl;
     std::cout<<GridLogMessage<<"  --dslash-generic: Wilson kernel for generic Nc"<<std::endl;    
     std::cout<<GridLogMessage<<"  --dslash-unroll : Wilson kernel for Nc=3"<<std::endl;    
@@ -578,7 +577,7 @@ void Grid_init(int *argc,char ***argv)
   }
 
   ////////////////////////////////////
-  // Debug and performance options
+  // Performance options
   ////////////////////////////////////
 
   if( GridCmdOptionExists(*argv,*argv+*argc,"--dslash-unroll") ){
@@ -601,6 +600,10 @@ void Grid_init(int *argc,char ***argv)
     StaggeredKernelsStatic::Comms = StaggeredKernelsStatic::CommsThenCompute;
   }
 
+  ////////////////////////////////
+  // Timestamping or not
+  ////////////////////////////////
+
   CartesianCommunicator::nCommThreads = 1;
   if( GridCmdOptionExists(*argv,*argv+*argc,"--notimestamp") ){
     GridLogTimestamp(0);
@@ -608,18 +611,23 @@ void Grid_init(int *argc,char ***argv)
     GridLogTimestamp(1);
   }
 
+  ////////////////////////////////
+  // Default layout
+  ////////////////////////////////
   GridParseLayout(*argv,*argc,
 		  Grid_default_latt,
 		  Grid_default_mpi);
 
-  if( GridCmdOptionExists(*argv,*argv+*argc,"--flightrecorder") ){
-    std::cout << GridLogMessage <<" Enabling flight recorder " <<std::endl;
-    FlightRecorder::SetLoggingMode(FlightRecorder::LoggingModeRecord);
-    FlightRecorder::PrintEntireLog = 1;
-    FlightRecorder::ChecksumComms  = 1;
-    FlightRecorder::ChecksumCommsSend=1;
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--batched-solver-split") ){
+    std::string arg = GridCmdOptionPayload(*argv,*argv+*argc,"--batched-solver-split");
+    if ( arg == "node" ) {
+      Grid_default_batched_solver_split_node = true;
+    } else {
+      GridCmdOptionIntVector(arg,Grid_default_batched_solver_split);
+      GRID_ASSERT(Grid_default_batched_solver_split.size() == Grid_default_mpi.size());
+    }
   }
-  
+
   if( GridCmdOptionExists(*argv,*argv+*argc,"--decomposition") ){
     std::cout<<GridLogMessage<<"Grid Default Decomposition patterns\n";
     std::cout<<GridLogMessage<<"\tOpenMP threads : "<<GridThread::GetThreads()<<std::endl;
@@ -629,24 +637,56 @@ void Grid_init(int *argc,char ***argv)
     std::cout<<GridLogMessage<<"\tvComplexF      : "<<sizeof(vComplexF)*8 <<"bits ; " <<GridCmdVectorIntToString(GridDefaultSimd(4,vComplexF::Nsimd()))<<std::endl;
     std::cout<<GridLogMessage<<"\tvComplexD      : "<<sizeof(vComplexD)*8 <<"bits ; " <<GridCmdVectorIntToString(GridDefaultSimd(4,vComplexD::Nsimd()))<<std::endl;
   }
+
+  ////////////////////////////////////
+  // Debug options
+  ////////////////////////////////////
+
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--debug-signals") ){
+    Grid_debug_handler_init();
+  }
+  // Sleep n-seconds at end of handler
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--signal-delay") ){
+    arg= GridCmdOptionPayload(*argv,*argv+*argc,"--signal-delay");
+    GridCmdOptionInt(arg,signal_delay);
+  }
+  // periodic wakeup with stack trace printed
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--debug-heartbeat") ){
+    Grid_debug_heartbeat();
+  }
+  // periodic wakeup with empty handler (interrupts some system calls)
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--heartbeat") ){
+    Grid_heartbeat();
+  }
+
+  if( GridCmdOptionExists(*argv,*argv+*argc,"--flightrecorder") ){
+    std::cout << GridLogMessage <<" Enabling flight recorder " <<std::endl;
+    FlightRecorder::SetLoggingMode(FlightRecorder::LoggingModeRecord);
+    FlightRecorder::PrintEntireLog = 1;
+    FlightRecorder::ChecksumComms  = 1;
+    FlightRecorder::ChecksumCommsSend=1;
+  }
+  
   Grid_is_initialised = 1;
 }
 
 
 void Grid_finalize(void)
 {
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-  std::cout<<GridLogMessage<<"******* Grid Finalize                ******"<<std::endl;
-  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
-
+  std::cout<<GridLogMessage<<"********************************************"<<std::endl;
+  std::cout<<GridLogMessage<<"******* Grid Finalize                 ******"<<std::endl;
+  CartesianCommunicator::BarrierWorld();
+  std::cout<<GridLogMessage<<"******* Grid Finalize synched         ******"<<std::endl;
+				    
 #if defined (GRID_COMMS_MPI) || defined (GRID_COMMS_MPI3) || defined (GRID_COMMS_MPIT)
-  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
-  Grid_unquiesce_nodes();
 #endif
 #if defined (GRID_COMMS_SHMEM)
   shmem_finalize();
 #endif
+  std::cout<<GridLogMessage<<"******* Grid Finalize successful     ******"<<std::endl;
+  std::cout<<GridLogMessage<<"*******************************************"<<std::endl;
+  //  Grid_unquiesce_nodes();
   Grid_is_initialised = 0;
 }
 
@@ -657,7 +697,6 @@ void GridLogLayout() {
   std::cout << GridLogMessage << "\tMPI tasks            : "<< GridCmdVectorIntToString(GridDefaultMpi()) << std::endl;
 }
 
-void * Grid_backtrace_buffer[_NBACKTRACE];
 #define SIGLOG(A) ::write(fileno_stderr,A,strlen(A));
 
 void sig_print_dig(uint32_t dig)
@@ -841,8 +880,8 @@ void Grid_heartbeat(void)
 
   // repeating 10s heartbeat
   struct itimerval it_val;
-  it_val.it_value.tv_sec = 10;
-  it_val.it_value.tv_usec = 1000;
+  it_val.it_value.tv_sec = 0;
+  it_val.it_value.tv_usec = 10000;
   it_val.it_interval = it_val.it_value;
   setitimer(ITIMER_REAL, &it_val, NULL);
 }
@@ -859,6 +898,7 @@ void Grid_debug_handler_init(void)
   sa.sa_flags    = SA_SIGINFO;
   sigaction(SIGTRAP,&sa,NULL);
   sigaction(SIGILL,&sa,NULL);
+  sigaction(SIGABRT,&sa,NULL); // SigABRT backtrace
 #ifndef GRID_SYCL
   sigaction(SIGSEGV,&sa,NULL); // SYCL is using SIGSEGV
   sigaction(SIGBUS,&sa,NULL);

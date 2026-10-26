@@ -207,7 +207,7 @@ void Lambda6Apply(uint64_t num1, uint64_t num2, uint64_t num3,
 	     cudaGetErrorString( err ));				\
       printf("File %s Line %d\n",__FILE__,__LINE__);			\
       fflush(stdout);							\
-      if (acceleratorAbortOnGpuError) assert(err==cudaSuccess);		\
+      if (acceleratorAbortOnGpuError) GRID_ASSERT(err==cudaSuccess);		\
     }									\
   }
 
@@ -218,7 +218,7 @@ inline void *acceleratorAllocHost(size_t bytes)
   if( err != cudaSuccess ) {
     ptr = (void *) NULL;
     printf(" cudaMallocHost failed for %zu %s \n",bytes,cudaGetErrorString(err));
-    assert(0);
+    GRID_ASSERT(0);
   }
   return ptr;
 }
@@ -229,7 +229,7 @@ inline void *acceleratorAllocShared(size_t bytes)
   if( err != cudaSuccess ) {
     ptr = (void *) NULL;
     printf(" cudaMallocManaged failed for %zu %s \n",bytes,cudaGetErrorString(err));
-    assert(0);
+    GRID_ASSERT(0);
   }
   return ptr;
 };
@@ -251,7 +251,7 @@ inline void acceleratorFreeDevice(void *ptr){ cudaFree(ptr);};
 inline void acceleratorFreeHost(void *ptr){ cudaFree(ptr);};
 inline void acceleratorCopyToDevice(const void *from,void *to,size_t bytes)  { cudaMemcpy(to,from,bytes, cudaMemcpyHostToDevice);}
 inline void acceleratorCopyFromDevice(const void *from,void *to,size_t bytes){ cudaMemcpy(to,from,bytes, cudaMemcpyDeviceToHost);}
-inline void acceleratorMemSet(void *base,int value,size_t bytes) { cudaMemset(base,value,bytes);}
+inline void acceleratorMemSet(void *base,int value,size_t bytes) { cudaMemset(base,value,bytes); cudaDeviceSynchronize(); }
 inline acceleratorEvent_t acceleratorCopyToDeviceAsynch(void *from, void *to, size_t bytes, cudaStream_t stream = copyStream) {
   acceleratorCopyToDevice(from,to,bytes);
   return 0;
@@ -278,7 +278,7 @@ inline int  acceleratorIsCommunicable(void *ptr)
   //  int uvm=0;
   //  auto 
   //  cuerr = cuPointerGetAttribute( &uvm, CU_POINTER_ATTRIBUTE_IS_MANAGED, (CUdeviceptr) ptr);
-  //  assert(cuerr == cudaSuccess );
+  //  GRID_ASSERT(cuerr == cudaSuccess );
   //  if(uvm) return 0;
   //  else    return 1;
     return 1;
@@ -434,22 +434,20 @@ accelerator_inline int acceleratorSIMTlane(int Nsimd) {
 
 #define accelerator_for2dNB( iter1, num1, iter2, num2, nsimd, ... )	\
   {									\
-    typedef uint64_t Iterator;						\
-    auto lambda = [=] accelerator					\
-      (Iterator iter1,Iterator iter2,Iterator lane ) mutable {		\
-      { __VA_ARGS__;}							\
-    };									\
-    int nt=acceleratorThreads();					\
-    dim3 hip_threads(nsimd, nt, 1);					 \
-    dim3 hip_blocks ((num1+nt-1)/nt,num2,1); \
-    if(hip_threads.x * hip_threads.y * hip_threads.z <= 64){ \
-      hipLaunchKernelGGL(LambdaApply64,hip_blocks,hip_threads,		\
-   	                 0,computeStream,						\
-			 num1,num2,nsimd, lambda);			\
-    } else { \
-      hipLaunchKernelGGL(LambdaApply,hip_blocks,hip_threads,		\
-			 0,computeStream,				\
-			 num1,num2,nsimd, lambda);			\
+    if (num1*num2) { \
+      typedef uint64_t Iterator;						\
+      auto lambda = [=] accelerator					\
+        (Iterator iter1,Iterator iter2,Iterator lane ) mutable {		\
+        { __VA_ARGS__;}							\
+      };									\
+      int nt=acceleratorThreads();					\
+      dim3 hip_threads(nsimd, nt, 1);					 \
+      dim3 hip_blocks ((num1+nt-1)/nt,num2,1); \
+      if(hip_threads.x * hip_threads.y * hip_threads.z <= 64){ \
+        LambdaApply64<<<hip_blocks,hip_threads,0,computeStream>>>(num1,num2,nsimd,lambda);			\
+      } else { \
+        LambdaApply<<<hip_blocks,hip_threads,0,computeStream>>>(num1,num2,nsimd,lambda);			\
+      } \
     } \
   }
 
@@ -527,10 +525,9 @@ inline void *acceleratorAllocDevice(size_t bytes)
 inline void acceleratorFreeHost(void *ptr){ auto discard=hipFree(ptr);};
 inline void acceleratorFreeShared(void *ptr){ auto discard=hipFree(ptr);};
 inline void acceleratorFreeDevice(void *ptr){ auto discard=hipFree(ptr);};
-inline void acceleratorCopyToDevice(const void *from,void *to,size_t bytes)  { auto discard=hipMemcpy(to,from,bytes, hipMemcpyHostToDevice);}
-inline void acceleratorCopyFromDevice(const void *from,void *to,size_t bytes){ auto discard=hipMemcpy(to,from,bytes, hipMemcpyDeviceToHost);}
-
-inline void acceleratorMemSet(void *base,int value,size_t bytes) { auto discard=hipMemset(base,value,bytes);}
+inline void acceleratorCopyToDevice(const void *from,void *to,size_t bytes)  { auto discard=hipMemcpy(to,from,bytes, hipMemcpyHostToDevice); }
+inline void acceleratorCopyFromDevice(const void *from,void *to,size_t bytes){ auto discard=hipMemcpy(to,from,bytes, hipMemcpyDeviceToHost); }
+inline void acceleratorMemSet(void *base,int value,size_t bytes) { auto discard=hipMemset(base,value,bytes); discard = hipDeviceSynchronize(); }
 
 typedef int acceleratorEvent_t;
 

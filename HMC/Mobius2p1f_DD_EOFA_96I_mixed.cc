@@ -27,7 +27,11 @@ See the full license in the file "LICENSE" in the top level distribution
 directory
 *************************************************************************************/
 /*  END LEGAL */
-#include <Grid/Grid.h>
+
+#include "disable_examples_without_instantiations.h"
+#ifdef ENABLE_FERMION_INSTANTIATIONS
+
+#include<Grid/Grid.h>
 
 NAMESPACE_BEGIN(Grid);
 
@@ -95,7 +99,7 @@ template<class FermionOperatorD, class FermionOperatorF, class SchurOperatorD, c
       //      std::cout << GridLogMessage << " Mixed precision CG wrapper operator() FermOpD " <<std::hex<< &(LinOpD._Mat) <<std::dec <<std::endl;
       // Assumption made in code to extract gauge field
       // We could avoid storing LinopD reference alltogether ?
-      assert(&(SchurOpU->_Mat)==&(LinOpD._Mat));
+      GRID_ASSERT(&(SchurOpU->_Mat)==&(LinOpD._Mat));
 
       ////////////////////////////////////////////////////////////////////////////////////
       // Must snarf a single precision copy of the gauge field in Linop_d argument
@@ -163,10 +167,6 @@ int main(int argc, char **argv) {
   typedef typename FermionAction::FermionField FermionField;
   typedef typename FermionActionF::FermionField FermionFieldF;
 
-  typedef WilsonImplD2 FermionImplPolicyD2;
-  typedef MobiusFermionD2 FermionActionD2;
-  typedef MobiusEOFAFermionD2 FermionEOFAActionD2;
-  typedef typename FermionActionD2::FermionField FermionFieldD2;
   
   typedef Grid::XmlReader       Serialiser;
 
@@ -516,5 +516,4 @@ int main(int argc, char **argv) {
   Grid_finalize();
 } // main
 
-
-
+#endif

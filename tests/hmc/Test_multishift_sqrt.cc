@@ -87,9 +87,6 @@ public:
   }
 };
 
-RealD InverseApproximation(RealD x){
-  return 1.0/x;
-}
 RealD SqrtApproximation(RealD x){
   return std::sqrt(x);
 }
@@ -139,7 +136,7 @@ int main (int argc, char ** argv)
   //  for(int n=0;n<poles.size();n++){
   //    a = a + residues[n]/(x+poles[n]);
   //  }
-  assert(Sqrt.order==degree);
+  GRID_ASSERT(Sqrt.order==degree);
 
   combined = Sqrt.norm*src;
   for(int i=0;i<degree;i++){

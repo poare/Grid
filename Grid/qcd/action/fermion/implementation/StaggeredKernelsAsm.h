@@ -624,7 +624,7 @@ void StaggeredKernels<Impl>::DhopSiteAsm(StencilView &st,
 					 SiteSpinor *buf, int sF,
 					 int sU, const FermionFieldView &in, FermionFieldView &out,int dag) 
 {
-  assert(0);
+  GRID_ASSERT(0);
 };
 
 
@@ -684,7 +684,7 @@ void StaggeredKernels<Impl>::DhopSiteAsm(StencilView &st,
 #ifdef STAG_VEC5D
   // This is the single precision 5th direction vectorised kernel
 #include <Grid/simd/Intel512single.h>
-template <> void StaggeredKernels<StaggeredVec5dImplF>::DhopSiteAsm(StencilView &st,
+template <> inline void StaggeredKernels<StaggeredVec5dImplF>::DhopSiteAsm(StencilView &st,
 								    DoubledGaugeFieldView &U,
 								    DoubledGaugeFieldView &UUU,
 								    SiteSpinor *buf, int sF,
@@ -733,13 +733,13 @@ template <> void StaggeredKernels<StaggeredVec5dImplF>::DhopSiteAsm(StencilView 
     }
    }
 #else 
-    assert(0);
+    GRID_ASSERT(0);
 #endif
    
 }
 
 #include <Grid/simd/Intel512double.h>
-template <> void StaggeredKernels<StaggeredVec5dImplD>::DhopSiteAsm(StencilView &st, 
+template <> inline void StaggeredKernels<StaggeredVec5dImplD>::DhopSiteAsm(StencilView &st, 
 								    DoubledGaugeFieldView &U,
 								    DoubledGaugeFieldView &UUU,
 								    SiteSpinor *buf, int sF,
@@ -787,7 +787,7 @@ template <> void StaggeredKernels<StaggeredVec5dImplD>::DhopSiteAsm(StencilView 
     }
   }
 #else 
-  assert(0);
+  GRID_ASSERT(0);
 #endif
 }
    
@@ -825,7 +825,7 @@ template <> void StaggeredKernels<StaggeredVec5dImplD>::DhopSiteAsm(StencilView 
   // This is the single precision 5th direction vectorised kernel
 
 #include <Grid/simd/Intel512single.h>
-template <> void StaggeredKernels<StaggeredImplF>::DhopSiteAsm(StencilView &st, 
+template <> inline void StaggeredKernels<StaggeredImplF>::DhopSiteAsm(StencilView &st, 
 							       DoubledGaugeFieldView &U,
 							       DoubledGaugeFieldView &UUU,
 							       SiteSpinor *buf, int sF,
@@ -889,12 +889,12 @@ template <> void StaggeredKernels<StaggeredImplF>::DhopSiteAsm(StencilView &st,
     }
   }
 #else 
-  assert(0);
+  GRID_ASSERT(0);
 #endif
 }
 
 #include <Grid/simd/Intel512double.h>
-template <> void StaggeredKernels<StaggeredImplD>::DhopSiteAsm(StencilView &st, 
+template <> inline void StaggeredKernels<StaggeredImplD>::DhopSiteAsm(StencilView &st, 
 							       DoubledGaugeFieldView &U,
 							       DoubledGaugeFieldView &UUU,
 							       SiteSpinor *buf, int sF,
@@ -958,9 +958,10 @@ template <> void StaggeredKernels<StaggeredImplD>::DhopSiteAsm(StencilView &st,
     }
   }
 #else 
-  assert(0);
+  GRID_ASSERT(0);
 #endif
 }
 
 NAMESPACE_END(Grid);
+#undef PERMUTE_DIR
 
