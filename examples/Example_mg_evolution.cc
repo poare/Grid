@@ -178,7 +178,7 @@ int main (int argc, char ** argv)
   typedef PVdagMLinearOperator       <MobiusFermionD,LatticeFermionD> PVdagM_t;
   typedef ShiftedPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedPVdagM_t;
   typedef Aggregation<vSpinColourVector,vTComplex,nbasis> Subspace;
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis> LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector CoarseVector;
   typedef MGPreconditioner<vSpinColourVector,vTComplex,nbasis> TwoLevelMG;
 
@@ -249,14 +249,14 @@ int main (int argc, char ** argv)
     r = src - r;
     relres = std::sqrt(norm2(r)/norm2(src));
 
-    std::cout<<GridLogMessage<<"MGEVO solve "<<tag<<" : outer steps = "<<L1PGCR.steps
+    std::cout<<GridLogMessage<<"MGEVO solve "<<tag<<" : outer steps = "<<L1PGCR.Steps()
 	     <<" relres "<<relres<<" time "<<tsolve<<" s"<<std::endl;
     std::cout<<GridLogMessage<<"MGEVO-PRECTIME "<<tag<<" calls "<<TwoLevelPrecon.calls
 	     <<" smooth "<<TwoLevelPrecon.tsmooth/1.0e6
 	     <<" coarse "<<TwoLevelPrecon.tcoarse/1.0e6
 	     <<" proj "  <<TwoLevelPrecon.tproj/1.0e6
 	     <<" fineop "<<TwoLevelPrecon.tfine/1.0e6<<std::endl;
-    return L1PGCR.steps;
+    return L1PGCR.Steps();
   };
 
   //////////////////////////////////////////////////////////////////////////

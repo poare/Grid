@@ -304,7 +304,7 @@ UpdateStats PerturbativeUpdate(std::vector<Field> &V,
 
     w = Zero();
     GCR(rhs, w);
-    st.iters.push_back(GCR.steps);
+    st.iters.push_back(GCR.Steps());
 
     counter.Set("measure");
     Op.Op(w, r);

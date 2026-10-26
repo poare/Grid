@@ -192,7 +192,7 @@ int main (int argc, char ** argv)
   {
     const int nb = 8;
     typedef Aggregation<vSpinColourVector,vTComplex,nb>               Subspace;
-    typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nb>    LittleDiracOperator;
+    typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nb>    LittleDiracOperator;
     typedef LittleDiracOperator::CoarseVector                         CoarseVector;
     typedef MGPreconditioner<vSpinColourVector,vTComplex,nb>          TwoLevelMG;
     typedef ShiftedPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedPVdagM_t;

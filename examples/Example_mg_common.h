@@ -233,7 +233,7 @@ std::vector<int> RefineSubspaceGCR(Aggregates &Agg,
 
     guess = Zero();
     GCR(src,guess);
-    steps[b] = GCR.steps;
+    steps[b] = GCR.Steps();
 
     scale = std::pow(norm2(guess),-0.5);
     Agg.subspace[b] = guess*scale;

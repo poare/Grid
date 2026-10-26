@@ -129,7 +129,7 @@ int main (int argc, char ** argv)
   typedef PVdagMLinearOperator       <MobiusFermionD,LatticeFermionD> PVdagM_t;
   typedef ShiftedPVdagMLinearOperator<MobiusFermionD,LatticeFermionD> ShiftedPVdagM_t;
   typedef Aggregation<vSpinColourVector,vTComplex,nbasis>             Subspace;
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis>  LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis>  LittleDiracOperator;
   typedef LittleDiracOperator::CoarseVector                           CoarseVector;
   typedef MGPreconditioner<vSpinColourVector,vTComplex,nbasis>        TwoLevelMG;
   typedef NonHermitianLinearOperator<LittleDiracOperator,CoarseVector> CoarseOp;
@@ -242,13 +242,13 @@ int main (int argc, char ** argv)
     if (useGCR) {
       FineGCR GCR(epsForce,(gcrSteps+15)/16,A,simpleFine,16,16);
       GCR(eta,x);
-      iters = GCR.steps;
+      iters = GCR.Steps();
     } else {
       RealD sm0 = MG->tsmooth, co0 = MG->tcoarse;
       FineGCR GCR(epsForce,(forceSteps+15)/16,A,*MG,16,16);
       GCR.Level(1);
       GCR(eta,x);
-      iters = GCR.steps;
+      iters = GCR.Steps();
       tsm = (MG->tsmooth-sm0)/1.0e6; tco = (MG->tcoarse-co0)/1.0e6;
     }
     t = (t+usecond())/1.0e6;

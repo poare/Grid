@@ -225,7 +225,7 @@ int Run(int argc, char **argv)
   // MG at U_0 for the correction solves (as in Example_mg_hmc.cc)
   //////////////////////////////////////////////////////////////////////////
   typedef Aggregation<vSpinColourVector,vTComplex,nbasis>             Subspace;
-  typedef GeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis>  LittleDiracOperator;
+  typedef DeprecatedGeneralCoarsenedMatrix<vSpinColourVector,vTComplex,nbasis>  LittleDiracOperator;
   typedef typename LittleDiracOperator::CoarseVector                  CoarseVector;
   typedef MGPreconditioner<vSpinColourVector,vTComplex,nbasis>        TwoLevelMG;
   typedef NonHermitianLinearOperator<LittleDiracOperator,CoarseVector> CoarseOp;
