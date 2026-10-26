@@ -145,6 +145,7 @@ struct ComplexComparator
         return std::abs(std::imag(z1)) > std::abs(std::imag(z2));
       default:
         assert(0);
+        return false;   // unreachable; silences missing-return warning
     }
   }
 };
@@ -238,17 +239,6 @@ class ComplexSchurDecomposition {
       lam2 = S(i+1, i+1);
       phi  = s / abs(s);
       r    = std::sqrt(std::pow(abs(s), 2) + std::pow(abs(lam2 - lam1), 2));
-
-      // // Original code which performs Givens rotations by manual matrix multiplication
-      // // compute Givens rotation corresponding to these parameters
-      // Givens = CMat::Identity(Nm, Nm);
-      // Givens(i, i)     = std::abs(s) / r;
-      // Givens(i+1, i+1) = Givens(i, i);
-      // Givens(i, i+1)   = (phi / r) * std::conj(lam2 - lam1);
-      // Givens(i+1, i)   = -std::conj(Givens(i, i+1));
-      // // rotate Schur matrix and unitary change of basis matrix Q
-      // S = Givens * S * Givens.adjoint();
-      // Q = Givens * Q;
 
       // Modified code
       Givens = CMat::Identity(2, 2);
