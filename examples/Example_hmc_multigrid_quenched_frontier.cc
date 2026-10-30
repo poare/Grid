@@ -33,7 +33,17 @@ Author: Patrick Oare
 //      every step logs MD time, plaquette and wall time.  TrajL and MDsteps are
 //      paired lists, with Ntraj trajectories per pair.  With Chain 0 each one
 //      starts from the starting configuration, with fresh momenta; with Chain 1
-//      each continues from the end of the last one.
+//      each continues from the end of the last one;
+//   5. with Mode set, MG solves at the gauge field of the MD (the passenger):
+//      every SolveEvery steps of the trajectories in SolveTraj (empty: all).
+//      The solve does not feed back, so with fixed seeds every Mode sees the
+//      same chain.  Sources are Gaussian, refreshed per trajectory.
+//
+//   Mode none        no solves in the MD
+//   Mode frozen      the fine operators follow U; basis and coarse operators
+//                    stay at the starting configuration
+//   Mode recoarsen   the same, and the coarse operators are rebuilt at U on
+//                    the frozen basis (needs Setup.RetainSubspace)
 //
 // RunMultiGrid 0 skips 1-3, for an HMC-only scan of the integrator.
 //
@@ -85,11 +95,15 @@ struct QuenchedHMCDriverParams : Serializable {
                                   std::vector<int>,   MDsteps,
                                   int,         Ntraj,           // trajectories per pair
                                   int,         Chain,           // 1: each trajectory continues from the last
+                                  std::string, Mode,            // none, frozen or recoarsen
+                                  int,         SolveEvery,      // MD steps between solves
+                                  std::vector<int>, SolveTraj,  // trajectories that get solves; empty: all
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
-      Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0) {};
+      Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
+      Mode("none"), SolveEvery(5) {};
 };
 
 int main (int argc, char ** argv)
@@ -116,6 +130,9 @@ int main (int argc, char ** argv)
       read(RD, "QuenchedHMCDriver", P);
     }
     CheckValidity(P.MultiGrid);
+    GRID_ASSERT( P.Mode=="none" || P.Mode=="frozen" || P.Mode=="recoarsen" );
+    GRID_ASSERT( P.Mode=="none" || P.RunMultiGrid );
+    GRID_ASSERT( P.Mode!="recoarsen" || P.MultiGrid.Setup.RetainSubspace );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
@@ -188,6 +205,20 @@ int main (int argc, char ** argv)
 
   Coarsening_t  Coarsening(CGrids, FGridsF, P.MultiGrid.Setup);
 
+  auto RunSolve = [&](int nr)
+  {
+    PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,nr);
+    std::vector<LatticeFermionD> src(nr,FGrid), sol(nr,FGrid);
+    for(int r=0;r<nr;r++){ gaussian(RNG5,src[r]); sol[r]=Zero(); }
+    Solver.Solve(src,sol);
+  };
+
+  auto Rebuild = [&]()
+  {
+    Coarsening.Coarsen(PVdagM);
+    Coarsening.BuildDenseBottom();
+  };
+
   if ( P.RunMultiGrid ) {
     //////////////////////////////////////////////////////////////////////
     // 1. Basis: generate (or load), then save a generated one
@@ -222,16 +253,15 @@ int main (int argc, char ** argv)
     //////////////////////////////////////////////////////////////////////
     // 3. Solves: mrhs then (optionally) single RHS through the SAME objects
     //////////////////////////////////////////////////////////////////////
-    auto RunSolve = [&](int nr)
-    {
-      PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,nr);
-      std::vector<LatticeFermionD> src(nr,FGrid), sol(nr,FGrid);
-      for(int r=0;r<nr;r++){ gaussian(RNG5,src[r]); sol[r]=Zero(); }
-      Solver.Solve(src,sol);
-    };
-
     RunSolve(P.Nrhs);
     if ( P.SolveSingleRHS && P.Nrhs != 1 ) RunSolve(1);
+
+    // The rebuild path against the first solve: same U, same basis
+    if ( P.Mode=="recoarsen" ) {
+      Rebuild();
+      std::cout << GridLogMessage << "QHMC-REBUILD-CHECK solve after a rebuild at the starting configuration" << std::endl;
+      RunSolve(P.Nrhs);
+    }
   }
 
   //////////////////////////////////////////////////////////////////////
@@ -247,6 +277,40 @@ int main (int argc, char ** argv)
   FullSet.push_back(Level1);
   GRID_ASSERT( P.TrajL.size()>0 && P.TrajL.size()==P.MDsteps.size() );
 
+  //////////////////////////////////////////////////////////////////////
+  // 5. The passenger solve, at the field of an MD step
+  //////////////////////////////////////////////////////////////////////
+  std::vector<LatticeFermionD> mdsrc(P.Mode=="none" ? 0 : P.Nrhs,FGrid);
+  std::vector<LatticeFermionD> mdsol(P.Mode=="none" ? 0 : P.Nrhs,FGrid);
+  auto SolveAtU = [&](int traj,int step,RealD t_MD)
+  {
+    RealD t_import = -usecond();
+    Ddwf.ImportGauge(Umu);
+    Dpv.ImportGauge(Umu);
+    precisionChange(UmuF,Umu);
+    DdwfF.ImportGauge(UmuF);
+    DpvF.ImportGauge(UmuF);
+    t_import = (t_import+usecond())/1.0e6;
+
+    RealD t_rebuild = -usecond();
+    if ( P.Mode=="recoarsen" ) Rebuild();
+    t_rebuild = (t_rebuild+usecond())/1.0e6;
+
+    RealD t_solve = -usecond();
+    PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
+    for(int r=0;r<P.Nrhs;r++) mdsol[r]=Zero();
+    Solver.Solve(mdsrc,mdsol);
+    t_solve = (t_solve+usecond())/1.0e6;
+    std::cout << GridLogMessage << "QHMC-SOLVE traj " << traj << " step " << step << " t_MD " << t_MD
+              << " import_seconds " << t_import << " rebuild_seconds " << t_rebuild
+              << " solve_seconds " << t_solve << std::endl;
+  };
+  auto SolvesIn = [&](int traj) -> bool {
+    if ( P.Mode=="none" ) return false;
+    if ( P.SolveTraj.empty() ) return true;
+    return std::find(P.SolveTraj.begin(),P.SolveTraj.end(),traj)!=P.SolveTraj.end();
+  };
+
   std::cout.precision(15);
   LatticeGaugeField U0 = Umu;
   for(int s=0;s<P.TrajL.size();s++){
@@ -259,6 +323,8 @@ int main (int argc, char ** argv)
     for(int t=0;t<P.Ntraj;t++){
       if ( !P.Chain ) Umu = U0;
       LatticeGaugeField Ustart = Umu;
+      const bool solves = SolvesIn(t);
+      if ( solves ) for(int r=0;r<P.Nrhs;r++) gaussian(RNG5,mdsrc[r]);
       RealD t_traj = -usecond();
       MD.refresh(Umu,sRNG,RNG4);
       RealD H0 = MD.Sinitial(Umu);
@@ -271,6 +337,7 @@ int main (int argc, char ** argv)
         std::cout << GridLogMessage << "QHMC-STEP " << step << " t_MD " << step*tau/N
                   << " plaquette " << WilsonLoops<Gimpl>::avgPlaquette(Umu)
                   << " seconds " << t_step << std::endl;
+        if ( solves && step%P.SolveEvery==0 ) SolveAtU(t,step,step*tau/N);
         t_last = usecond();
       });
 
