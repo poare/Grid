@@ -295,6 +295,8 @@ int main (int argc, char ** argv)
     RealD t_rebuild = -usecond();
     if ( P.Mode=="recoarsen" ) Rebuild();
     t_rebuild = (t_rebuild+usecond())/1.0e6;
+    if ( P.Mode=="recoarsen" ) Coarsening.CertifyCoarsening(PVdagM);
+    RealD null_resid = InvarianceResidual(Coarsening.rawNull,PVdagM);
 
     RealD t_solve = -usecond();
     PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
@@ -303,7 +305,7 @@ int main (int argc, char ** argv)
     t_solve = (t_solve+usecond())/1.0e6;
     std::cout << GridLogMessage << "QHMC-SOLVE traj " << traj << " step " << step << " t_MD " << t_MD
               << " import_seconds " << t_import << " rebuild_seconds " << t_rebuild
-              << " solve_seconds " << t_solve << std::endl;
+              << " solve_seconds " << t_solve << " null_resid " << null_resid << std::endl;
   };
   auto SolvesIn = [&](int traj) -> bool {
     if ( P.Mode=="none" ) return false;
