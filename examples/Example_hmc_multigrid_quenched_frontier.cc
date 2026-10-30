@@ -24,24 +24,28 @@ Author: Patrick Oare
 // of the deflation-basis-in-HMC plan (research hub, projects/multigrid,
 // writeups/deflation_basis_evolution):
 //
-//   1. breed the near-null basis on the starting configuration (timed, fine
+//   1. generate the near-null basis on the starting configuration (timed, fine
 //      matvecs counted) and save it, or load a saved one;
 //   2. coarsen, build the dense bottom and certify, as Example_pvdagm_multigrid;
 //   3. one mrhs and one single-RHS solve on that basis;
-//   4. one quenched trajectory: Iwasaki gauge action only, MinimumNorm2,
+//   4. quenched trajectories: Iwasaki gauge action only, MinimumNorm2,
 //      momentum refresh, MD, Metropolis.  No solve is attached to the MD yet;
-//      every step logs MD time, plaquette and wall time.
+//      every step logs MD time, plaquette and wall time.  TrajL and MDsteps are
+//      paired lists, with Ntraj trajectories per pair, each from the starting
+//      configuration with fresh momenta.
+//
+// RunMultiGrid 0 skips 1-3, for an HMC-only scan of the integrator.
 //
 // Every parameter is in ONE serialisable struct, read from XML with
 // --hmc-params, as in Example_pvdagm_multigrid.  The basis:
 //
 //   MultiGrid.Setup.SubspaceFile set    the file is LOADED, and must exist:
 //                                       given a missing file, GetSubspace
-//                                       would breed and save over that path.
-//   MultiGrid.Setup.SubspaceFile empty  the basis is BRED, then saved to
+//                                       would generate and save over that path.
+//   MultiGrid.Setup.SubspaceFile empty  the basis is GENERATED, then saved to
 //                                       SaveSubspace if that is set.  An
 //                                       existing SaveSubspace stops the run
-//                                       before the breed.
+//                                       before generating.
 //
 #include <Grid/Grid.h>
 #include <Grid/lattice/PaddedCell.h>
@@ -71,17 +75,19 @@ struct QuenchedHMCDriverParams : Serializable {
                                   RealD,       MobiusB,
                                   RealD,       MobiusC,
                                   std::string, Config,          // empty: hot start
-                                  std::string, SaveSubspace,    // a bred basis is saved here; empty: not saved
+                                  std::string, SaveSubspace,    // a generated basis is saved here; empty: not saved
                                   int,         Nrhs,
                                   int,         SolveSingleRHS,  // also run Nrhs=1 through the same objects
                                   RealD,       Beta,            // Iwasaki gauge action
-                                  RealD,       TrajL,
-                                  int,         MDsteps,
+                                  int,         RunMultiGrid,    // 0: skip sections 1-3, HMC only
+                                  std::vector<RealD>, TrajL,    // one (TrajL,MDsteps) pair per scan point
+                                  std::vector<int>,   MDsteps,
+                                  int,         Ntraj,           // trajectories per pair, each from the start config
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
-      Beta(2.13), TrajL(1.0), MDsteps(20) {};
+      Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1) {};
 };
 
 int main (int argc, char ** argv)
@@ -146,12 +152,12 @@ int main (int argc, char ** argv)
     return e!=0;
   };
   const std::string &SubspaceFile = P.MultiGrid.Setup.SubspaceFile;
-  const int breed = ( SubspaceFile.length() == 0 );
-  if ( !breed && !FileExists(SubspaceFile) ) {
+  const int generate = ( SubspaceFile.length() == 0 );
+  if ( P.RunMultiGrid && !generate && !FileExists(SubspaceFile) ) {
     std::cout << GridLogError << "SubspaceFile " << SubspaceFile << " does not exist" << std::endl;
     GRID_ASSERT(0);
   }
-  if ( breed && P.SaveSubspace.length() && FileExists(P.SaveSubspace) ) {
+  if ( P.RunMultiGrid && generate && P.SaveSubspace.length() && FileExists(P.SaveSubspace) ) {
     std::cout << GridLogError << "SaveSubspace " << P.SaveSubspace << " exists; not overwriting" << std::endl;
     GRID_ASSERT(0);
   }
@@ -180,52 +186,54 @@ int main (int argc, char ** argv)
 
   Coarsening_t  Coarsening(CGrids, FGridsF, P.MultiGrid.Setup);
 
-  //////////////////////////////////////////////////////////////////////
-  // 1. Basis: breed (or load), then save a bred one
-  //////////////////////////////////////////////////////////////////////
-  counter.Set("subspace");
-  RealD t_subspace = -usecond();
-  Coarsening.GetSubspace(RNG5, CountedPVdagM);
-  t_subspace = (t_subspace+usecond())/1.0e6;
-  std::cout << GridLogMessage << "QHMC-SUBSPACE " << (breed ? "bred" : "loaded")
-            << " seconds " << t_subspace << " fine_matvecs " << counter.Get("subspace") << std::endl;
+  if ( P.RunMultiGrid ) {
+    //////////////////////////////////////////////////////////////////////
+    // 1. Basis: generate (or load), then save a generated one
+    //////////////////////////////////////////////////////////////////////
+    counter.Set("subspace");
+    RealD t_subspace = -usecond();
+    Coarsening.GetSubspace(RNG5, CountedPVdagM);
+    t_subspace = (t_subspace+usecond())/1.0e6;
+    std::cout << GridLogMessage << "QHMC-SUBSPACE " << (generate ? "generated" : "loaded")
+              << " seconds " << t_subspace << " fine_matvecs " << counter.Get("subspace") << std::endl;
 
-  if ( breed && P.SaveSubspace.length() ) {
-    RealD t_save = -usecond();
-    saveSubspace(Coarsening.rawNull, P.SaveSubspace);
-    t_save = (t_save+usecond())/1.0e6;
-    std::cout << GridLogMessage << "QHMC-SAVE " << P.SaveSubspace << " seconds " << t_save << std::endl;
+    if ( generate && P.SaveSubspace.length() ) {
+      RealD t_save = -usecond();
+      saveSubspace(Coarsening.rawNull, P.SaveSubspace);
+      t_save = (t_save+usecond())/1.0e6;
+      std::cout << GridLogMessage << "QHMC-SAVE " << P.SaveSubspace << " seconds " << t_save << std::endl;
+    }
+
+    //////////////////////////////////////////////////////////////////////
+    // 2. Coarsen, dense bottom, certificate
+    //////////////////////////////////////////////////////////////////////
+    RealD t_coarsen = -usecond();
+    Coarsening.Coarsen(PVdagM);
+    t_coarsen = (t_coarsen+usecond())/1.0e6;
+    RealD t_dense = -usecond();
+    Coarsening.BuildDenseBottom();
+    t_dense = (t_dense+usecond())/1.0e6;
+    Coarsening.CertifyCoarsening(PVdagM);
+    std::cout << GridLogMessage << "QHMC-SETUP coarsen_seconds " << t_coarsen
+              << " dense_seconds " << t_dense << std::endl;
+
+    //////////////////////////////////////////////////////////////////////
+    // 3. Solves: mrhs then (optionally) single RHS through the SAME objects
+    //////////////////////////////////////////////////////////////////////
+    auto RunSolve = [&](int nr)
+    {
+      PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,nr);
+      std::vector<LatticeFermionD> src(nr,FGrid), sol(nr,FGrid);
+      for(int r=0;r<nr;r++){ gaussian(RNG5,src[r]); sol[r]=Zero(); }
+      Solver.Solve(src,sol);
+    };
+
+    RunSolve(P.Nrhs);
+    if ( P.SolveSingleRHS && P.Nrhs != 1 ) RunSolve(1);
   }
 
   //////////////////////////////////////////////////////////////////////
-  // 2. Coarsen, dense bottom, certificate
-  //////////////////////////////////////////////////////////////////////
-  RealD t_coarsen = -usecond();
-  Coarsening.Coarsen(PVdagM);
-  t_coarsen = (t_coarsen+usecond())/1.0e6;
-  RealD t_dense = -usecond();
-  Coarsening.BuildDenseBottom();
-  t_dense = (t_dense+usecond())/1.0e6;
-  Coarsening.CertifyCoarsening(PVdagM);
-  std::cout << GridLogMessage << "QHMC-SETUP coarsen_seconds " << t_coarsen
-            << " dense_seconds " << t_dense << std::endl;
-
-  //////////////////////////////////////////////////////////////////////
-  // 3. Solves: mrhs then (optionally) single RHS through the SAME objects
-  //////////////////////////////////////////////////////////////////////
-  auto RunSolve = [&](int nr)
-  {
-    PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,nr);
-    std::vector<LatticeFermionD> src(nr,FGrid), sol(nr,FGrid);
-    for(int r=0;r<nr;r++){ gaussian(RNG5,src[r]); sol[r]=Zero(); }
-    Solver.Solve(src,sol);
-  };
-
-  RunSolve(P.Nrhs);
-  if ( P.SolveSingleRHS && P.Nrhs != 1 ) RunSolve(1);
-
-  //////////////////////////////////////////////////////////////////////
-  // 4. One quenched trajectory
+  // 4. Quenched trajectories, Ntraj per (TrajL,MDsteps) pair
   //////////////////////////////////////////////////////////////////////
   typedef PeriodicGimplR                     Gimpl;
   typedef NoSmearing<Gimpl>                  SmearingPolicy;
@@ -235,35 +243,45 @@ int main (int argc, char ** argv)
   Level1.push_back(&GaugeAction);
   ActionSet<LatticeGaugeField,NoHirep> FullSet;
   FullSet.push_back(Level1);
-  IntegratorParameters MDpar(P.MDsteps,P.TrajL);
-  SmearingPolicy Smearing;
-  IntegratorType MD(UGrid,MDpar,FullSet,Smearing);
+  GRID_ASSERT( P.TrajL.size()>0 && P.TrajL.size()==P.MDsteps.size() );
 
   std::cout.precision(15);
   LatticeGaugeField U0 = Umu;
-  RealD t_traj = -usecond();
-  MD.refresh(Umu,sRNG,RNG4);
-  RealD H0 = MD.Sinitial(Umu);
-  std::cout << GridLogMessage << "QHMC-STEP 0 t_MD 0 plaquette "
-            << WilsonLoops<Gimpl>::avgPlaquette(Umu) << " seconds 0" << std::endl;
+  for(int s=0;s<P.TrajL.size();s++){
+    RealD tau = P.TrajL[s];
+    int   N   = P.MDsteps[s];
+    IntegratorParameters MDpar(N,tau);
+    SmearingPolicy Smearing;
+    IntegratorType MD(UGrid,MDpar,FullSet,Smearing);
 
-  RealD t_last = usecond();
-  IntegrateWithHook(MD,Umu,[&](int step) {
-    RealD t_step = (usecond()-t_last)/1.0e6;
-    std::cout << GridLogMessage << "QHMC-STEP " << step << " t_MD " << step*P.TrajL/P.MDsteps
-              << " plaquette " << WilsonLoops<Gimpl>::avgPlaquette(Umu)
-              << " seconds " << t_step << std::endl;
-    t_last = usecond();
-  });
+    for(int t=0;t<P.Ntraj;t++){
+      Umu = U0;
+      RealD t_traj = -usecond();
+      MD.refresh(Umu,sRNG,RNG4);
+      RealD H0 = MD.Sinitial(Umu);
+      std::cout << GridLogMessage << "QHMC-STEP 0 t_MD 0 plaquette "
+                << WilsonLoops<Gimpl>::avgPlaquette(Umu) << " seconds 0" << std::endl;
 
-  RealD H1 = MD.S(Umu);
-  RealD dH = H1 - H0;
-  bool accept = MetropolisAccept(dH,sRNG);
-  if ( !accept ) Umu = U0;
-  t_traj = (t_traj+usecond())/1.0e6;
-  std::cout << GridLogMessage << "QHMC-TRAJ H0 " << H0 << " H1 " << H1 << " dH " << dH
-            << " accept " << accept << " plaquette " << WilsonLoops<Gimpl>::avgPlaquette(Umu)
-            << " seconds " << t_traj << std::endl;
+      RealD t_last = usecond();
+      IntegrateWithHook(MD,Umu,[&](int step) {
+        RealD t_step = (usecond()-t_last)/1.0e6;
+        std::cout << GridLogMessage << "QHMC-STEP " << step << " t_MD " << step*tau/N
+                  << " plaquette " << WilsonLoops<Gimpl>::avgPlaquette(Umu)
+                  << " seconds " << t_step << std::endl;
+        t_last = usecond();
+      });
+
+      RealD H1 = MD.S(Umu);
+      RealD dH = H1 - H0;
+      bool accept = MetropolisAccept(dH,sRNG);
+      if ( !accept ) Umu = U0;
+      t_traj = (t_traj+usecond())/1.0e6;
+      std::cout << GridLogMessage << "QHMC-TRAJ tau " << tau << " N " << N << " traj " << t
+                << " H0 " << H0 << " H1 " << H1 << " dH " << dH
+                << " accept " << accept << " plaquette " << WilsonLoops<Gimpl>::avgPlaquette(Umu)
+                << " seconds " << t_traj << std::endl;
+    }
+  }
 
   counter.Report("QHMC-MATVECS");
   Grid_finalize();
