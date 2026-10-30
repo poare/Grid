@@ -44,6 +44,10 @@ Author: Patrick Oare
 //                    stay at the starting configuration
 //   Mode recoarsen   the same, and the coarse operators are rebuilt at U on
 //                    the frozen basis (needs Setup.RetainSubspace)
+//   Mode refresh     the live basis gets one sloppy inverse-iteration pass per
+//                    vector at U (RefreshTol, RefreshMaxOuter restarts of
+//                    GCR(10,10)), then the same rebuild.  A rejected
+//                    trajectory restores the basis of its start.
 //
 // RunMultiGrid 0 skips 1-3, for an HMC-only scan of the integrator.
 //
@@ -64,6 +68,7 @@ Author: Patrick Oare
 #include <Grid/algorithms/iterative/PrecGeneralisedConjugateResidualNonHermitian.h>
 #include <Grid/algorithms/multigrid/PVdagMMultiGrid.h>
 #include "Example_mg_hmc.h"
+#include "Example_mg_refine.h"
 
 using namespace std;
 using namespace Grid;
@@ -95,15 +100,17 @@ struct QuenchedHMCDriverParams : Serializable {
                                   std::vector<int>,   MDsteps,
                                   int,         Ntraj,           // trajectories per pair
                                   int,         Chain,           // 1: each trajectory continues from the last
-                                  std::string, Mode,            // none, frozen or recoarsen
+                                  std::string, Mode,            // none, frozen, recoarsen or refresh
                                   int,         SolveEvery,      // MD steps between solves
                                   std::vector<int>, SolveTraj,  // trajectories that get solves; empty: all
+                                  RealD,       RefreshTol,      // Mode refresh: GCR tolerance per vector
+                                  int,         RefreshMaxOuter, // Mode refresh: restarts of GCR(10,10) per vector
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5) {};
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1) {};
 };
 
 int main (int argc, char ** argv)
@@ -130,9 +137,9 @@ int main (int argc, char ** argv)
       read(RD, "QuenchedHMCDriver", P);
     }
     CheckValidity(P.MultiGrid);
-    GRID_ASSERT( P.Mode=="none" || P.Mode=="frozen" || P.Mode=="recoarsen" );
+    GRID_ASSERT( P.Mode=="none" || P.Mode=="frozen" || P.Mode=="recoarsen" || P.Mode=="refresh" );
     GRID_ASSERT( P.Mode=="none" || P.RunMultiGrid );
-    GRID_ASSERT( P.Mode!="recoarsen" || P.MultiGrid.Setup.RetainSubspace );
+    GRID_ASSERT( (P.Mode!="recoarsen" && P.Mode!="refresh") || P.MultiGrid.Setup.RetainSubspace );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
@@ -282,6 +289,7 @@ int main (int argc, char ** argv)
   //////////////////////////////////////////////////////////////////////
   std::vector<LatticeFermionD> mdsrc(P.Mode=="none" ? 0 : P.Nrhs,FGrid);
   std::vector<LatticeFermionD> mdsol(P.Mode=="none" ? 0 : P.Nrhs,FGrid);
+  const bool rebuilds = ( P.Mode=="recoarsen" || P.Mode=="refresh" );
   auto SolveAtU = [&](int traj,int step,RealD t_MD)
   {
     RealD t_import = -usecond();
@@ -292,11 +300,26 @@ int main (int argc, char ** argv)
     DpvF.ImportGauge(UmuF);
     t_import = (t_import+usecond())/1.0e6;
 
+    RealD null_before = InvarianceResidual(Coarsening.rawNull,PVdagM);
+    RealD t_refresh = 0.0;
+    uint64_t mv_refresh = 0;
+    RealD refresh_steps = 0.0;
+    if ( P.Mode=="refresh" ) {
+      counter.Set("refresh");
+      uint64_t m0 = counter.Get("refresh");
+      t_refresh = -usecond();
+      std::vector<int> steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
+      t_refresh = (t_refresh+usecond())/1.0e6;
+      mv_refresh = counter.Get("refresh") - m0;
+      for(auto s : steps) refresh_steps += (RealD)s/steps.size();
+    }
+
     RealD t_rebuild = -usecond();
-    if ( P.Mode=="recoarsen" ) Rebuild();
+    if ( rebuilds ) Rebuild();
     t_rebuild = (t_rebuild+usecond())/1.0e6;
-    if ( P.Mode=="recoarsen" ) Coarsening.CertifyCoarsening(PVdagM);
+    if ( rebuilds ) Coarsening.CertifyCoarsening(PVdagM);
     RealD null_resid = InvarianceResidual(Coarsening.rawNull,PVdagM);
+    RealD gram_cond  = SpanProjector<LatticeFermionD>(Coarsening.rawNull).GramCondition();
 
     RealD t_solve = -usecond();
     PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
@@ -305,7 +328,10 @@ int main (int argc, char ** argv)
     t_solve = (t_solve+usecond())/1.0e6;
     std::cout << GridLogMessage << "QHMC-SOLVE traj " << traj << " step " << step << " t_MD " << t_MD
               << " import_seconds " << t_import << " rebuild_seconds " << t_rebuild
-              << " solve_seconds " << t_solve << " null_resid " << null_resid << std::endl;
+              << " solve_seconds " << t_solve << " null_resid " << null_resid
+              << " null_before " << null_before << " refresh_seconds " << t_refresh
+              << " refresh_matvecs " << mv_refresh << " refresh_steps " << refresh_steps
+              << " gram_cond " << gram_cond << std::endl;
   };
   auto SolvesIn = [&](int traj) -> bool {
     if ( P.Mode=="none" ) return false;
@@ -326,6 +352,8 @@ int main (int argc, char ** argv)
       if ( !P.Chain ) Umu = U0;
       LatticeGaugeField Ustart = Umu;
       const bool solves = SolvesIn(t);
+      std::vector<LatticeFermionD> Vstart;
+      if ( P.Mode=="refresh" && P.Ntraj>1 ) Vstart = Coarsening.rawNull;
       if ( solves ) for(int r=0;r<P.Nrhs;r++) gaussian(RNG5,mdsrc[r]);
       RealD t_traj = -usecond();
       MD.refresh(Umu,sRNG,RNG4);
@@ -346,7 +374,10 @@ int main (int argc, char ** argv)
       RealD H1 = MD.S(Umu);
       RealD dH = H1 - H0;
       bool accept = MetropolisAccept(dH,sRNG);
-      if ( !accept ) Umu = Ustart;
+      if ( !accept ) {
+        Umu = Ustart;
+        if ( !Vstart.empty() ) Coarsening.rawNull = Vstart;
+      }
       t_traj = (t_traj+usecond())/1.0e6;
       std::cout << GridLogMessage << "QHMC-TRAJ tau " << tau << " N " << N << " traj " << t
                 << " H0 " << H0 << " H1 " << H1 << " dH " << dH

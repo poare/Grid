@@ -31,6 +31,7 @@ Author: Patrick Oare
 
 #include <Grid/algorithms/iterative/PrecGeneralisedConjugateResidual.h>
 #include <Grid/algorithms/iterative/PrecGeneralisedConjugateResidualNonHermitian.h>
+#include "Example_mg_refine.h"
 
 NAMESPACE_BEGIN(Grid);
 
@@ -196,52 +197,15 @@ public:
   }
 };
 
-//////////////////////////////////////////////////////////////////////////////
-// Subspace refresh by inverse iteration (strategy (c)).
-//
-// This is the non-Hermitian (GCR) analogue of Aggregation::RefineSubspace:
-// each existing basis vector is used to seed ONE sloppy inverse-iteration
-// pass with the CURRENT operator,
-//     v_new  ~  [PV^dag M (U_t)]^{-1} v_old   (solved loosely),
-// which contracts the O(dU) error of the stale vector back towards the
-// near-null space of the updated operator. The structure mirrors the inner
-// loop of Aggregation::CreateSubspaceGCR, but seeded with the old vector
-// instead of fresh noise, and with a much smaller iteration budget.
-// Returns the GCR steps taken for each vector.
-//////////////////////////////////////////////////////////////////////////////
+// Subspace refresh by inverse iteration (strategy (c)): RefineBasisGCR on the
+// vectors of an Aggregation.
 template<class Aggregates, class Field>
 std::vector<int> RefineSubspaceGCR(Aggregates &Agg,
 		       LinearOperatorBase<Field> &DiracOp,
 		       int nn,
 		       RealD tol, int maxouter)
 {
-  RealD scale;
-  TrivialPrecon<Field> simple;
-  PrecGeneralisedConjugateResidualNonHermitian<Field> GCR(tol,maxouter,DiracOp,simple,10,10);
-
-  Field src(Agg.FineGrid);
-  Field guess(Agg.FineGrid);
-  Field Mn(Agg.FineGrid);
-  std::vector<int> steps(nn);
-
-  for(int b=0;b<nn;b++){
-    scale = std::pow(norm2(Agg.subspace[b]),-0.5);
-    src   = Agg.subspace[b]*scale;
-
-    DiracOp.Op(src,Mn);
-    std::cout<<GridLogMessage << "refine-in ["<<b<<"] <v|Op|v> "<<innerProduct(src,Mn)<<std::endl;
-
-    guess = Zero();
-    GCR(src,guess);
-    steps[b] = GCR.Steps();
-
-    scale = std::pow(norm2(guess),-0.5);
-    Agg.subspace[b] = guess*scale;
-
-    DiracOp.Op(Agg.subspace[b],Mn);
-    std::cout<<GridLogMessage << "refine-out["<<b<<"] <v|Op|v> "<<innerProduct(Agg.subspace[b],Mn)<<std::endl;
-  }
-  return steps;
+  return RefineBasisGCR(Agg.subspace,DiracOp,nn,tol,maxouter);
 }
 
 //////////////////////////////////////////////////////////////////////////////
