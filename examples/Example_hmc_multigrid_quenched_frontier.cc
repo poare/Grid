@@ -31,8 +31,9 @@ Author: Patrick Oare
 //   4. quenched trajectories: Iwasaki gauge action only, MinimumNorm2,
 //      momentum refresh, MD, Metropolis.  No solve is attached to the MD yet;
 //      every step logs MD time, plaquette and wall time.  TrajL and MDsteps are
-//      paired lists, with Ntraj trajectories per pair, each from the starting
-//      configuration with fresh momenta.
+//      paired lists, with Ntraj trajectories per pair.  With Chain 0 each one
+//      starts from the starting configuration, with fresh momenta; with Chain 1
+//      each continues from the end of the last one.
 //
 // RunMultiGrid 0 skips 1-3, for an HMC-only scan of the integrator.
 //
@@ -82,12 +83,13 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         RunMultiGrid,    // 0: skip sections 1-3, HMC only
                                   std::vector<RealD>, TrajL,    // one (TrajL,MDsteps) pair per scan point
                                   std::vector<int>,   MDsteps,
-                                  int,         Ntraj,           // trajectories per pair, each from the start config
+                                  int,         Ntraj,           // trajectories per pair
+                                  int,         Chain,           // 1: each trajectory continues from the last
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
-      Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1) {};
+      Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0) {};
 };
 
 int main (int argc, char ** argv)
@@ -255,7 +257,8 @@ int main (int argc, char ** argv)
     IntegratorType MD(UGrid,MDpar,FullSet,Smearing);
 
     for(int t=0;t<P.Ntraj;t++){
-      Umu = U0;
+      if ( !P.Chain ) Umu = U0;
+      LatticeGaugeField Ustart = Umu;
       RealD t_traj = -usecond();
       MD.refresh(Umu,sRNG,RNG4);
       RealD H0 = MD.Sinitial(Umu);
@@ -274,7 +277,7 @@ int main (int argc, char ** argv)
       RealD H1 = MD.S(Umu);
       RealD dH = H1 - H0;
       bool accept = MetropolisAccept(dH,sRNG);
-      if ( !accept ) Umu = U0;
+      if ( !accept ) Umu = Ustart;
       t_traj = (t_traj+usecond())/1.0e6;
       std::cout << GridLogMessage << "QHMC-TRAJ tau " << tau << " N " << N << " traj " << t
                 << " H0 " << H0 << " H1 " << H1 << " dH " << dH
