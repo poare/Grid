@@ -44,9 +44,9 @@ Author: Patrick Oare
 //                    stay at the starting configuration
 //   Mode recoarsen   the same, and the coarse operators are rebuilt at U on
 //                    the frozen basis (needs Setup.RetainSubspace)
-//   Mode refresh     the live basis gets one sloppy inverse-iteration pass per
-//                    vector at U (RefreshTol, RefreshMaxOuter restarts of
-//                    GCR(10,10)), then the same rebuild.  A rejected
+//   Mode refresh     the live basis gets RefreshPasses sloppy inverse-iteration
+//                    passes per vector at U (RefreshTol, RefreshMaxOuter restarts
+//                    of GCR(10,10)), then the same rebuild.  A rejected
 //                    trajectory restores the basis of its start.
 //
 // RunMultiGrid 0 skips 1-3, for an HMC-only scan of the integrator.
@@ -105,12 +105,13 @@ struct QuenchedHMCDriverParams : Serializable {
                                   std::vector<int>, SolveTraj,  // trajectories that get solves; empty: all
                                   RealD,       RefreshTol,      // Mode refresh: GCR tolerance per vector
                                   int,         RefreshMaxOuter, // Mode refresh: restarts of GCR(10,10) per vector
+                                  int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1) {};
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1) {};
 };
 
 int main (int argc, char ** argv)
@@ -308,7 +309,9 @@ int main (int argc, char ** argv)
       counter.Set("refresh");
       uint64_t m0 = counter.Get("refresh");
       t_refresh = -usecond();
-      std::vector<int> steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
+      std::vector<int> steps;
+      for(int p=0;p<P.RefreshPasses;p++)
+        steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
       t_refresh = (t_refresh+usecond())/1.0e6;
       mv_refresh = counter.Get("refresh") - m0;
       for(auto s : steps) refresh_steps += (RealD)s/steps.size();
