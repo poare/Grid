@@ -48,6 +48,16 @@ Author: Patrick Oare
 //                    passes per vector at U (RefreshTol, RefreshMaxOuter restarts
 //                    of GCR(10,10)), then the same rebuild.  A rejected
 //                    trajectory restores the basis of its start.
+//   Mode perturbative  the first-order update v -> v - w, (Q A Q) w = Q dA v,
+//                    with dA = A(U) - A(U at the last update) and Q the
+//                    projector off the basis: mrhs GCR in batches of CorrNrhs,
+//                    preconditioned by the V-cycle from the last update, to
+//                    CorrTol, at most CorrMaxRestarts restarts.  Then the
+//                    same rebuild and the same restore on rejection.
+//   Mode control     no MG (RunMultiGrid 0): the same system PV^dag M x = b
+//                    at U by Krylov.  PV^dag y = b by CG on PV^dag PV (y = PV z),
+//                    then M x = y by red-black CG to Outer.Tol on the Schur
+//                    system.  The true residual of PV^dag M is logged after.
 //
 // RunMultiGrid 0 skips 1-3, for an HMC-only scan of the integrator.
 //
@@ -72,6 +82,20 @@ Author: Patrick Oare
 
 using namespace std;
 using namespace Grid;
+
+// Q M for an mrhs preconditioner M.  GCR hands it residuals already in the
+// range of Q, so only the output needs projecting.
+template<class Field>
+class MrhsProjectedPreconditioner : public MrhsLinearFunction<Field> {
+  SpanProjector<Field>      &_Q;
+  MrhsLinearFunction<Field> &_M;
+public:
+  MrhsProjectedPreconditioner(SpanProjector<Field> &Q, MrhsLinearFunction<Field> &M) : _Q(Q), _M(M) {};
+  void operator()(std::vector<Field> &in, std::vector<Field> &out) {
+    _M(in,out);
+    for(auto &f : out) _Q.Complement(f,f);
+  }
+};
 
 #ifndef NBASIS
 #define NBASIS 60
@@ -100,18 +124,22 @@ struct QuenchedHMCDriverParams : Serializable {
                                   std::vector<int>,   MDsteps,
                                   int,         Ntraj,           // trajectories per pair
                                   int,         Chain,           // 1: each trajectory continues from the last
-                                  std::string, Mode,            // none, frozen, recoarsen or refresh
+                                  std::string, Mode,            // none, frozen, recoarsen, refresh, perturbative or control
                                   int,         SolveEvery,      // MD steps between solves
                                   std::vector<int>, SolveTraj,  // trajectories that get solves; empty: all
                                   RealD,       RefreshTol,      // Mode refresh: GCR tolerance per vector
                                   int,         RefreshMaxOuter, // Mode refresh: restarts of GCR(10,10) per vector
                                   int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
+                                  RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
+                                  int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
+                                  int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1) {};
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1),
+      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12) {};
 };
 
 int main (int argc, char ** argv)
@@ -138,9 +166,10 @@ int main (int argc, char ** argv)
       read(RD, "QuenchedHMCDriver", P);
     }
     CheckValidity(P.MultiGrid);
-    GRID_ASSERT( P.Mode=="none" || P.Mode=="frozen" || P.Mode=="recoarsen" || P.Mode=="refresh" );
-    GRID_ASSERT( P.Mode=="none" || P.RunMultiGrid );
-    GRID_ASSERT( (P.Mode!="recoarsen" && P.Mode!="refresh") || P.MultiGrid.Setup.RetainSubspace );
+    GRID_ASSERT( P.Mode=="none" || P.Mode=="frozen" || P.Mode=="recoarsen" || P.Mode=="refresh" || P.Mode=="perturbative" || P.Mode=="control" );
+    GRID_ASSERT( P.Mode=="none" || P.Mode=="control" || P.RunMultiGrid );
+    GRID_ASSERT( (P.Mode!="recoarsen" && P.Mode!="refresh" && P.Mode!="perturbative") || P.MultiGrid.Setup.RetainSubspace );
+    GRID_ASSERT( P.Mode!="perturbative" || NBASIS%P.CorrNrhs==0 );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
@@ -194,6 +223,11 @@ int main (int argc, char ** argv)
 
   typedef PVdagMLinearOperator<MobiusFermionD,LatticeFermionD> PVdagM_t;
   PVdagM_t PVdagM(Ddwf,Dpv);
+
+  // A at the U of the last update, for dA in Mode perturbative
+  MobiusFermionD DdwfLast(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,P.Mass,P.M5,P.MobiusB,P.MobiusC);
+  MobiusFermionD DpvLast (Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0,   P.M5,P.MobiusB,P.MobiusC);
+  PVdagM_t PVdagMLast(DdwfLast,DpvLast);
 
   MatvecCounter counter;
   CountingLinearOperator<LatticeFermionD> CountedPVdagM(PVdagM,counter);
@@ -290,7 +324,50 @@ int main (int argc, char ** argv)
   //////////////////////////////////////////////////////////////////////
   std::vector<LatticeFermionD> mdsrc(P.Mode=="none" ? 0 : P.Nrhs,FGrid);
   std::vector<LatticeFermionD> mdsol(P.Mode=="none" ? 0 : P.Nrhs,FGrid);
-  const bool rebuilds = ( P.Mode=="recoarsen" || P.Mode=="refresh" );
+  const bool updates  = ( P.Mode=="refresh" || P.Mode=="perturbative" );
+  const bool rebuilds = ( P.Mode=="recoarsen" || updates );
+
+  // One first-order update of the basis, at the operators already imported;
+  // the coarse operators are still those of the last update.  Returns the mean
+  // outer steps per batch.
+  auto PerturbativeBasisUpdate = [&](int traj,int step) -> RealD
+  {
+    std::vector<LatticeFermionD> &V = Coarsening.rawNull;
+    std::vector<LatticeFermionD> Vlast = V;      // Q stays fixed while V changes
+    SpanProjector<LatticeFermionD> Q(Vlast);
+    GRID_ASSERT( Q.Ok() );
+    ProjectedLinearOperator<LatticeFermionD> QAQ(Q,CountedPVdagM);
+    PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.CorrNrhs);
+    MrhsProjectedPreconditioner<LatticeFermionD> QM(Q,Solver.ThreeLevelPrecon);
+    MrhsPGCRNonHermitian<LatticeFermionD> GCR(P.CorrTol,P.CorrMaxRestarts,QAQ,QM,P.MultiGrid.Outer.Mmax,P.MultiGrid.Outer.Nstep);
+    GCR.Name("Fcorrect");
+    GCR.SetZeroGuess(1);
+
+    std::vector<LatticeFermionD> rhs(P.CorrNrhs,FGrid), w(P.CorrNrhs,FGrid);
+    LatticeFermionD Aold(FGrid);
+    RealD steps = 0.0;
+    for(int b0=0;b0<NBASIS;b0+=P.CorrNrhs){
+      for(int r=0;r<P.CorrNrhs;r++){
+        CountedPVdagM.Op(Vlast[b0+r],rhs[r]);
+        PVdagMLast.Op(Vlast[b0+r],Aold);
+        rhs[r] = rhs[r] - Aold;
+        Q.Complement(rhs[r],rhs[r]);
+      }
+      RealD t_batch = -usecond();
+      GCR(rhs,w);
+      t_batch = (t_batch+usecond())/1.0e6;
+      steps += (RealD)GCR.steps*P.CorrNrhs/NBASIS;
+      RealD wratio = 0.0;
+      for(int r=0;r<P.CorrNrhs;r++){
+        wratio += std::sqrt(norm2(w[r])/norm2(Vlast[b0+r]))/P.CorrNrhs;
+        V[b0+r] = Vlast[b0+r] - w[r];
+        V[b0+r] = V[b0+r]*std::pow(norm2(V[b0+r]),-0.5);
+      }
+      std::cout << GridLogMessage << "QHMC-CORRECT traj " << traj << " step " << step << " first " << b0
+                << " steps " << GCR.steps << " seconds " << t_batch << " wratio " << wratio << std::endl;
+    }
+    return steps;
+  };
   auto SolveAtU = [&](int traj,int step,RealD t_MD)
   {
     RealD t_import = -usecond();
@@ -302,19 +379,23 @@ int main (int argc, char ** argv)
     t_import = (t_import+usecond())/1.0e6;
 
     RealD null_before = InvarianceResidual(Coarsening.rawNull,PVdagM);
-    RealD t_refresh = 0.0;
-    uint64_t mv_refresh = 0;
-    RealD refresh_steps = 0.0;
-    if ( P.Mode=="refresh" ) {
-      counter.Set("refresh");
-      uint64_t m0 = counter.Get("refresh");
-      t_refresh = -usecond();
-      std::vector<int> steps;
-      for(int p=0;p<P.RefreshPasses;p++)
-        steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
-      t_refresh = (t_refresh+usecond())/1.0e6;
-      mv_refresh = counter.Get("refresh") - m0;
-      for(auto s : steps) refresh_steps += (RealD)s/steps.size();
+    RealD t_update = 0.0;
+    uint64_t mv_update = 0;
+    RealD update_steps = 0.0;
+    if ( updates ) {
+      counter.Set("update");
+      uint64_t m0 = counter.Get("update");
+      t_update = -usecond();
+      if ( P.Mode=="refresh" ) {
+        std::vector<int> steps;
+        for(int p=0;p<P.RefreshPasses;p++)
+          steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
+        for(auto s : steps) update_steps += (RealD)s/steps.size();
+      } else {
+        update_steps = PerturbativeBasisUpdate(traj,step);
+      }
+      t_update = (t_update+usecond())/1.0e6;
+      mv_update = counter.Get("update") - m0;
     }
 
     RealD t_rebuild = -usecond();
@@ -332,9 +413,39 @@ int main (int argc, char ** argv)
     std::cout << GridLogMessage << "QHMC-SOLVE traj " << traj << " step " << step << " t_MD " << t_MD
               << " import_seconds " << t_import << " rebuild_seconds " << t_rebuild
               << " solve_seconds " << t_solve << " null_resid " << null_resid
-              << " null_before " << null_before << " refresh_seconds " << t_refresh
-              << " refresh_matvecs " << mv_refresh << " refresh_steps " << refresh_steps
+              << " null_before " << null_before << " update_seconds " << t_update
+              << " update_matvecs " << mv_update << " update_steps " << update_steps
               << " gram_cond " << gram_cond << std::endl;
+    if ( P.Mode=="perturbative" ) {
+      DdwfLast.ImportGauge(Umu);
+      DpvLast.ImportGauge(Umu);
+    }
+  };
+  auto ControlAtU = [&](int traj,int step,RealD t_MD)
+  {
+    Ddwf.ImportGauge(Umu);
+    Dpv.ImportGauge(Umu);
+    MdagMLinearOperator<MobiusFermionD,LatticeFermionD> PVdagPV(Dpv);
+    ConjugateGradient<LatticeFermionD> CGpv(1.0e-2*P.MultiGrid.Outer.Tol,100000,false);
+    ConjugateGradient<LatticeFermionD> CG(P.MultiGrid.Outer.Tol,100000,false);
+    SchurRedBlackDiagMooeeSolve<LatticeFermionD> RBCG(CG);
+    std::vector<LatticeFermionD> sol(1,FGrid), y(1,FGrid);
+    LatticeFermionD z(FGrid), r(FGrid);
+    sol[0] = Zero();
+    z = Zero();
+    RealD t_pv = -usecond();
+    CGpv(PVdagPV,mdsrc[0],z);
+    Dpv.M(z,y[0]);
+    t_pv = (t_pv+usecond())/1.0e6;
+    RealD t_solve = -usecond();
+    RBCG(Ddwf,y,sol);
+    t_solve = (t_solve+usecond())/1.0e6;
+    PVdagM.Op(sol[0],r);
+    r = r - mdsrc[0];
+    std::cout << GridLogMessage << "QHMC-CONTROL traj " << traj << " step " << step << " t_MD " << t_MD
+              << " pv_seconds " << t_pv << " pv_iters " << CGpv.IterationsToComplete
+              << " solve_seconds " << t_solve << " iters " << CG.IterationsToComplete
+              << " true_resid " << std::sqrt(norm2(r)/norm2(mdsrc[0])) << std::endl;
   };
   auto SolvesIn = [&](int traj) -> bool {
     if ( P.Mode=="none" ) return false;
@@ -356,7 +467,11 @@ int main (int argc, char ** argv)
       LatticeGaugeField Ustart = Umu;
       const bool solves = SolvesIn(t);
       std::vector<LatticeFermionD> Vstart;
-      if ( P.Mode=="refresh" && P.Ntraj>1 ) Vstart = Coarsening.rawNull;
+      if ( updates && P.Ntraj>1 ) Vstart = Coarsening.rawNull;
+      if ( P.Mode=="perturbative" ) {
+        DdwfLast.ImportGauge(Umu);
+        DpvLast.ImportGauge(Umu);
+      }
       if ( solves ) for(int r=0;r<P.Nrhs;r++) gaussian(RNG5,mdsrc[r]);
       RealD t_traj = -usecond();
       MD.refresh(Umu,sRNG,RNG4);
@@ -370,7 +485,10 @@ int main (int argc, char ** argv)
         std::cout << GridLogMessage << "QHMC-STEP " << step << " t_MD " << step*tau/N
                   << " plaquette " << WilsonLoops<Gimpl>::avgPlaquette(Umu)
                   << " seconds " << t_step << std::endl;
-        if ( solves && step%P.SolveEvery==0 ) SolveAtU(t,step,step*tau/N);
+        if ( solves && step%P.SolveEvery==0 ) {
+          if ( P.Mode=="control" ) ControlAtU(t,step,step*tau/N);
+          else                     SolveAtU(t,step,step*tau/N);
+        }
         t_last = usecond();
       });
 

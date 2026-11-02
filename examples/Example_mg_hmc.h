@@ -106,12 +106,14 @@ public:
 template<class Field>
 class SpanProjector {
   std::vector<Field>          &_V;
+  std::vector<const Field *>   _Vp;
   Eigen::LLT<Eigen::MatrixXcd> _LLT;
   RealD                        _Cond;
   bool                         _Ok;
 public:
   SpanProjector(std::vector<Field> &V) : _V(V) {
     int nn = _V.size();
+    for (auto &v : _V) _Vp.push_back(&v);
     Eigen::MatrixXcd G(nn,nn);
     for (int i = 0; i < nn; i++) {
       for (int j = i; j < nn; j++) {
@@ -133,11 +135,15 @@ public:
   void Complement(const Field &in, Field &out) const {
     assert(_Ok);
     int nn = _V.size();
+    std::vector<ComplexD> ip;
+    innerProductMulti(ip,_Vp,in);
     Eigen::VectorXcd c(nn);
-    for (int i = 0; i < nn; i++) c(i) = innerProduct(_V[i],in);
+    for (int i = 0; i < nn; i++) c(i) = ip[i];
     Eigen::VectorXcd a = _LLT.solve(c);
-    out = in;
-    for (int i = 0; i < nn; i++) out = out - ComplexD(a(i)) * _V[i];
+    std::vector<ComplexD> b(nn);
+    for (int i = 0; i < nn; i++) b[i] = -ComplexD(a(i));
+    if ( &in == &out ) axpyMulti(out,b,_Vp);
+    else               axpyMultiFrom(out,in,b,_Vp);
   }
 };
 
