@@ -49,13 +49,18 @@ Author: Patrick Oare
 //                    of GCR(10,10)), then the same rebuild.  A rejected
 //                    trajectory restores the basis of its start.
 //                    RefreshOrthonormalise 1 orthonormalises the basis after
-//                    each pass (subspace iteration).
+//                    each pass (subspace iteration).  RefreshKick > 0 adds
+//                    Gaussian noise of that size relative to |v| to every
+//                    vector before each pass, from its own RNG so the MD
+//                    sources are unchanged.
 //   Mode perturbative  the first-order update v -> v - w, (Q A Q) w = Q dA v,
 //                    with dA = A(U) - A(U at the last update) and Q the
 //                    projector off the basis: mrhs GCR in batches of CorrNrhs,
 //                    preconditioned by the V-cycle from the last update, to
-//                    CorrTol, at most CorrMaxRestarts restarts.  Then the
-//                    same rebuild and the same restore on rejection.
+//                    CorrTol, at most CorrMaxRestarts restarts.  Q is rebuilt
+//                    from the current basis for each batch (no copy of the
+//                    old one), an O(eps^2) change.  Then the same rebuild and
+//                    the same restore on rejection.
 //   Mode control     no MG (RunMultiGrid 0): the same system PV^dag M x = b
 //                    at U by Krylov.  PV^dag y = b by CG on PV^dag PV (y = PV z),
 //                    then M x = y by red-black CG to Outer.Tol on the Schur
@@ -133,6 +138,7 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         RefreshMaxOuter, // Mode refresh: restarts of GCR(10,10) per vector
                                   int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
                                   int,         RefreshOrthonormalise, // Mode refresh: 1 orthonormalises after each pass
+                                  RealD,       RefreshKick,     // Mode refresh: noise before each pass, relative to |v|; 0: none
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
                                   int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
@@ -141,7 +147,7 @@ struct QuenchedHMCDriverParams : Serializable {
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0),
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0),
       CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12) {};
 };
 
@@ -189,6 +195,7 @@ int main (int argc, char ** argv)
 
   GridParallelRNG RNG4(UGrid); RNG4.SeedFixedIntegers({1,2,3,4});
   GridParallelRNG RNG5(FGrid); RNG5.SeedFixedIntegers({5,6,7,8});
+  GridParallelRNG RNGkick(FGrid); RNGkick.SeedFixedIntegers({9,10,11,12});  // Mode refresh kicks only
   GridSerialRNG   sRNG;        sRNG.SeedFixedIntegers({9,10,11,12});
 
   LatticeGaugeField Umu(UGrid);
@@ -351,23 +358,28 @@ int main (int argc, char ** argv)
   auto PerturbativeBasisUpdate = [&](int traj,int step) -> RealD
   {
     std::vector<LatticeFermionD> &V = Coarsening.rawNull;
-    std::vector<LatticeFermionD> Vlast = V;      // Q stays fixed while V changes
-    SpanProjector<LatticeFermionD> Q(Vlast);
-    GRID_ASSERT( Q.Ok() );
-    ProjectedLinearOperator<LatticeFermionD> QAQ(Q,CountedPVdagM);
     PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.CorrNrhs);
-    MrhsProjectedPreconditioner<LatticeFermionD> QM(Q,Solver.ThreeLevelPrecon);
-    MrhsPGCRNonHermitian<LatticeFermionD> GCR(P.CorrTol,P.CorrMaxRestarts,QAQ,QM,P.MultiGrid.Outer.Mmax,P.MultiGrid.Outer.Nstep);
-    GCR.Name("Fcorrect");
-    GCR.SetZeroGuess(1);
+    RealD mem_solver = FreeDeviceMB();
 
-    std::vector<LatticeFermionD> rhs(P.CorrNrhs,FGrid), w(P.CorrNrhs,FGrid);
+    // No copy of the old basis (60 fine fields): Q is rebuilt from the current
+    // V for each batch, so later batches project off a span in which earlier
+    // vectors have already moved by O(eps).  w is O(eps), so this changes it at
+    // O(eps^2), inside the first-order update.
+    std::vector<LatticeFermionD> rhs(P.CorrNrhs,FGrid), w(P.CorrNrhs,FGrid), vold(P.CorrNrhs,FGrid);
     LatticeFermionD Aold(FGrid);
     RealD steps = 0.0;
     for(int b0=0;b0<NBASIS;b0+=P.CorrNrhs){
+      SpanProjector<LatticeFermionD> Q(V);
+      GRID_ASSERT( Q.Ok() );
+      ProjectedLinearOperator<LatticeFermionD> QAQ(Q,CountedPVdagM);
+      MrhsProjectedPreconditioner<LatticeFermionD> QM(Q,Solver.ThreeLevelPrecon);
+      MrhsPGCRNonHermitian<LatticeFermionD> GCR(P.CorrTol,P.CorrMaxRestarts,QAQ,QM,P.MultiGrid.Outer.Mmax,P.MultiGrid.Outer.Nstep);
+      GCR.Name("Fcorrect");
+      GCR.SetZeroGuess(1);
       for(int r=0;r<P.CorrNrhs;r++){
-        CountedPVdagM.Op(Vlast[b0+r],rhs[r]);
-        PVdagMLast.Op(Vlast[b0+r],Aold);
+        vold[r] = V[b0+r];
+        CountedPVdagM.Op(vold[r],rhs[r]);
+        PVdagMLast.Op(vold[r],Aold);
         rhs[r] = rhs[r] - Aold;
         Q.Complement(rhs[r],rhs[r]);
       }
@@ -377,12 +389,13 @@ int main (int argc, char ** argv)
       steps += (RealD)GCR.steps*P.CorrNrhs/NBASIS;
       RealD wratio = 0.0;
       for(int r=0;r<P.CorrNrhs;r++){
-        wratio += std::sqrt(norm2(w[r])/norm2(Vlast[b0+r]))/P.CorrNrhs;
-        V[b0+r] = Vlast[b0+r] - w[r];
+        wratio += std::sqrt(norm2(w[r])/norm2(vold[r]))/P.CorrNrhs;
+        V[b0+r] = vold[r] - w[r];
         V[b0+r] = V[b0+r]*std::pow(norm2(V[b0+r]),-0.5);
       }
       std::cout << GridLogMessage << "QHMC-CORRECT traj " << traj << " step " << step << " first " << b0
-                << " steps " << GCR.steps << " seconds " << t_batch << " wratio " << wratio << std::endl;
+                << " steps " << GCR.steps << " seconds " << t_batch << " wratio " << wratio
+                << " free_solver_MB " << mem_solver << " free_batch_MB " << FreeDeviceMB() << std::endl;
     }
     return steps;
   };
@@ -408,6 +421,7 @@ int main (int argc, char ** argv)
       if ( P.Mode=="refresh" ) {
         std::vector<int> steps;
         for(int p=0;p<P.RefreshPasses;p++){
+          if ( P.RefreshKick>0.0 ) KickBasis(Coarsening.rawNull,RNGkick,P.RefreshKick);
           steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
           if ( P.RefreshOrthonormalise ) OrthonormaliseBasis(Coarsening.rawNull);
         }
@@ -443,7 +457,6 @@ int main (int argc, char ** argv)
     std::cout << GridLogMessage << "QHMC-MEM traj " << traj << " step " << step
               << " free_start_MB " << mem_start << " free_update_MB " << mem_update
               << " free_rebuild_MB " << mem_rebuild << " free_solve_MB " << mem_solve
-              << " grid_net_MB " << ((MemoryManager::DeviceAllocBytes-MemoryManager::DeviceFreeBytes)>>20)
               << " grid_cache_MB " << (MemoryManager::DeviceCacheBytes()>>20) << std::endl;
     if ( P.Mode=="perturbative" ) {
       DdwfLast.ImportGauge(Umu);

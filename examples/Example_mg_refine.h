@@ -75,4 +75,20 @@ void OrthonormaliseBasis(std::vector<Field> &V)
   }
 }
 
+//////////////////////////////////////////////////////////////////////////////
+// v -> v + kick |v| eta/|eta|, eta Gaussian, before an inverse-iteration pass,
+// which smooths the noise into a fresh low-mode component.  Keeps the basis a
+// random sample of the low-mode band instead of converging to the lowest
+// eigenspace under repeated passes.
+//////////////////////////////////////////////////////////////////////////////
+template<class Field>
+void KickBasis(std::vector<Field> &V, GridParallelRNG &RNG, RealD kick)
+{
+  Field eta(V[0].Grid());
+  for(auto &v : V){
+    gaussian(RNG,eta);
+    v = v + (kick*std::sqrt(norm2(v)/norm2(eta)))*eta;
+  }
+}
+
 NAMESPACE_END(Grid);
