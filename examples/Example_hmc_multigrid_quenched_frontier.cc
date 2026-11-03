@@ -48,6 +48,8 @@ Author: Patrick Oare
 //                    passes per vector at U (RefreshTol, RefreshMaxOuter restarts
 //                    of GCR(10,10)), then the same rebuild.  A rejected
 //                    trajectory restores the basis of its start.
+//                    RefreshOrthonormalise 1 orthonormalises the basis after
+//                    each pass (subspace iteration).
 //   Mode perturbative  the first-order update v -> v - w, (Q A Q) w = Q dA v,
 //                    with dA = A(U) - A(U at the last update) and Q the
 //                    projector off the basis: mrhs GCR in batches of CorrNrhs,
@@ -130,6 +132,7 @@ struct QuenchedHMCDriverParams : Serializable {
                                   RealD,       RefreshTol,      // Mode refresh: GCR tolerance per vector
                                   int,         RefreshMaxOuter, // Mode refresh: restarts of GCR(10,10) per vector
                                   int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
+                                  int,         RefreshOrthonormalise, // Mode refresh: 1 orthonormalises after each pass
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
                                   int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
@@ -138,7 +141,7 @@ struct QuenchedHMCDriverParams : Serializable {
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1),
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0),
       CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12) {};
 };
 
@@ -327,6 +330,21 @@ int main (int argc, char ** argv)
   const bool updates  = ( P.Mode=="refresh" || P.Mode=="perturbative" );
   const bool rebuilds = ( P.Mode=="recoarsen" || updates );
 
+  // Free device memory in MB on the emptiest rank, so growth shows in the log
+  // before an allocation fails.  For the QHMC-MEM line of each solve.
+  auto FreeDeviceMB = [&]() -> RealD
+  {
+    size_t free_t=0,total_t=0;
+#if defined(GRID_HIP)
+    auto discard = hipMemGetInfo(&free_t,&total_t);
+#elif defined(GRID_CUDA)
+    cudaMemGetInfo(&free_t,&total_t);
+#endif
+    RealD neg = -(RealD)(free_t>>20);
+    FGrid->GlobalMax(neg);
+    return -neg;
+  };
+
   // One first-order update of the basis, at the operators already imported;
   // the coarse operators are still those of the last update.  Returns the mean
   // outer steps per batch.
@@ -378,6 +396,7 @@ int main (int argc, char ** argv)
     DpvF.ImportGauge(UmuF);
     t_import = (t_import+usecond())/1.0e6;
 
+    RealD mem_start = FreeDeviceMB();
     RealD null_before = InvarianceResidual(Coarsening.rawNull,PVdagM);
     RealD t_update = 0.0;
     uint64_t mv_update = 0;
@@ -388,8 +407,10 @@ int main (int argc, char ** argv)
       t_update = -usecond();
       if ( P.Mode=="refresh" ) {
         std::vector<int> steps;
-        for(int p=0;p<P.RefreshPasses;p++)
+        for(int p=0;p<P.RefreshPasses;p++){
           steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
+          if ( P.RefreshOrthonormalise ) OrthonormaliseBasis(Coarsening.rawNull);
+        }
         for(auto s : steps) update_steps += (RealD)s/steps.size();
       } else {
         update_steps = PerturbativeBasisUpdate(traj,step);
@@ -397,11 +418,13 @@ int main (int argc, char ** argv)
       t_update = (t_update+usecond())/1.0e6;
       mv_update = counter.Get("update") - m0;
     }
+    RealD mem_update = FreeDeviceMB();
 
     RealD t_rebuild = -usecond();
     if ( rebuilds ) Rebuild();
     t_rebuild = (t_rebuild+usecond())/1.0e6;
     if ( rebuilds ) Coarsening.CertifyCoarsening(PVdagM);
+    RealD mem_rebuild = FreeDeviceMB();
     RealD null_resid = InvarianceResidual(Coarsening.rawNull,PVdagM);
     RealD gram_cond  = SpanProjector<LatticeFermionD>(Coarsening.rawNull).GramCondition();
 
@@ -410,12 +433,18 @@ int main (int argc, char ** argv)
     for(int r=0;r<P.Nrhs;r++) mdsol[r]=Zero();
     Solver.Solve(mdsrc,mdsol);
     t_solve = (t_solve+usecond())/1.0e6;
+    RealD mem_solve = FreeDeviceMB();
     std::cout << GridLogMessage << "QHMC-SOLVE traj " << traj << " step " << step << " t_MD " << t_MD
               << " import_seconds " << t_import << " rebuild_seconds " << t_rebuild
               << " solve_seconds " << t_solve << " null_resid " << null_resid
               << " null_before " << null_before << " update_seconds " << t_update
               << " update_matvecs " << mv_update << " update_steps " << update_steps
               << " gram_cond " << gram_cond << std::endl;
+    std::cout << GridLogMessage << "QHMC-MEM traj " << traj << " step " << step
+              << " free_start_MB " << mem_start << " free_update_MB " << mem_update
+              << " free_rebuild_MB " << mem_rebuild << " free_solve_MB " << mem_solve
+              << " grid_net_MB " << ((MemoryManager::DeviceAllocBytes-MemoryManager::DeviceFreeBytes)>>20)
+              << " grid_cache_MB " << (MemoryManager::DeviceCacheBytes()>>20) << std::endl;
     if ( P.Mode=="perturbative" ) {
       DdwfLast.ImportGauge(Umu);
       DpvLast.ImportGauge(Umu);

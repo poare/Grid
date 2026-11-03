@@ -58,4 +58,21 @@ std::vector<int> RefineBasisGCR(std::vector<Field> &V,
   return steps;
 }
 
+//////////////////////////////////////////////////////////////////////////////
+// Orthonormalise the basis in place (modified Gram-Schmidt, in index order).
+// Between RefineBasisGCR passes this turns independent inverse iteration,
+// which drives every vector towards the same lowest modes, into subspace
+// iteration, which converges to the low-mode space of the whole basis.
+// Aggregation::GlobalOrthonormalise does this on its own copy of the basis,
+// which costs nbasis more fine fields.
+//////////////////////////////////////////////////////////////////////////////
+template<class Field>
+void OrthonormaliseBasis(std::vector<Field> &V)
+{
+  for(int i=0;i<(int)V.size();i++){
+    basisOrthogonalize(V,V[i],i);
+    V[i] = V[i]*std::pow(norm2(V[i]),-0.5);
+  }
+}
+
 NAMESPACE_END(Grid);
