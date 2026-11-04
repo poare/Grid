@@ -79,6 +79,11 @@ Author: Patrick Oare
 //                                       existing SaveSubspace stops the run
 //                                       before generating.
 //
+//   NoiseBasis 1 then replaces the basis by normalised Gaussian noise, from
+//   its own RNG, before coarsening: with Mode refresh at a fixed field, the
+//   solve before the MD has k = 0 rounds of inverse iteration and MD step n
+//   has k = n RefreshPasses.
+//
 #include <Grid/Grid.h>
 #include <Grid/lattice/PaddedCell.h>
 #include <Grid/stencil/GeneralLocalStencil.h>
@@ -139,6 +144,7 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
                                   int,         RefreshOrthonormalise, // Mode refresh: 1 orthonormalises after each pass
                                   RealD,       RefreshKick,     // Mode refresh: noise before each pass, relative to |v|; 0: none
+                                  int,         NoiseBasis,      // 1: replace the basis by Gaussian noise before coarsening (k = 0)
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
                                   int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
@@ -147,7 +153,7 @@ struct QuenchedHMCDriverParams : Serializable {
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0),
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), NoiseBasis(0),
       CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12) {};
 };
 
@@ -196,6 +202,7 @@ int main (int argc, char ** argv)
   GridParallelRNG RNG4(UGrid); RNG4.SeedFixedIntegers({1,2,3,4});
   GridParallelRNG RNG5(FGrid); RNG5.SeedFixedIntegers({5,6,7,8});
   GridParallelRNG RNGkick(FGrid); RNGkick.SeedFixedIntegers({9,10,11,12});  // Mode refresh kicks only
+  GridParallelRNG RNGnoise(FGrid); RNGnoise.SeedFixedIntegers({13,14,15,16});  // NoiseBasis only
   GridSerialRNG   sRNG;        sRNG.SeedFixedIntegers({9,10,11,12});
 
   LatticeGaugeField Umu(UGrid);
@@ -287,6 +294,16 @@ int main (int argc, char ** argv)
       saveSubspace(Coarsening.rawNull, P.SaveSubspace);
       t_save = (t_save+usecond())/1.0e6;
       std::cout << GridLogMessage << "QHMC-SAVE " << P.SaveSubspace << " seconds " << t_save << std::endl;
+    }
+
+    // The A^{-k} scan from k = 0: noise in place of the basis, so that each
+    // Mode refresh pass adds one round of inverse iteration
+    if ( P.NoiseBasis ) {
+      for(auto &v : Coarsening.rawNull){
+        gaussian(RNGnoise,v);
+        v = v*std::pow(norm2(v),-0.5);
+      }
+      std::cout << GridLogMessage << "QHMC-NOISEBASIS basis replaced by normalised Gaussian noise" << std::endl;
     }
 
     //////////////////////////////////////////////////////////////////////
