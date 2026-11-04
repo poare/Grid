@@ -74,9 +74,7 @@ public:
       subspace[i] = subspace[i]*scale;
     }
     for(int i=0;i<nbasis; i++){
-      for(int j=0;j<i; j++){
-	basisOrthogonalize(subspace,subspace[i],j);
-      }
+      basisOrthogonalize(subspace,subspace[i],i);
       RealD scale = std::pow(norm2(subspace[i]),-0.5); 
       subspace[i] = subspace[i]*scale;
     }

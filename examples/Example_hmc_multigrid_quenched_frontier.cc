@@ -148,13 +148,15 @@ struct QuenchedHMCDriverParams : Serializable {
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
                                   int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
+                                  std::string, CorrPrecon,      // Mode perturbative: mg (mrhs GCR, V-cycle) or none (plain GCR per vector)
+                                  int,         CorrKrylovNstep, // CorrPrecon none: GCR(Nstep,Nstep), CorrMaxRestarts restarts
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
       Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), NoiseBasis(0),
-      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12) {};
+      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrPrecon("mg"), CorrKrylovNstep(10) {};
 };
 
 int main (int argc, char ** argv)
@@ -185,6 +187,7 @@ int main (int argc, char ** argv)
     GRID_ASSERT( P.Mode=="none" || P.Mode=="control" || P.RunMultiGrid );
     GRID_ASSERT( (P.Mode!="recoarsen" && P.Mode!="refresh" && P.Mode!="perturbative") || P.MultiGrid.Setup.RetainSubspace );
     GRID_ASSERT( P.Mode!="perturbative" || NBASIS%P.CorrNrhs==0 );
+    GRID_ASSERT( P.CorrPrecon=="mg" || P.CorrPrecon=="none" );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
@@ -375,7 +378,11 @@ int main (int argc, char ** argv)
   auto PerturbativeBasisUpdate = [&](int traj,int step) -> RealD
   {
     std::vector<LatticeFermionD> &V = Coarsening.rawNull;
-    PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.CorrNrhs);
+    // CorrPrecon none needs no MG solver: plain GCR on QAQ per vector, as the
+    // refresh's GCR(10,10) but on the correction equation.
+    std::unique_ptr<PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t>> Solver;
+    if ( P.CorrPrecon=="mg" )
+      Solver.reset(new PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t>(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.CorrNrhs));
     RealD mem_solver = FreeDeviceMB();
 
     // No copy of the old basis (60 fine fields): Q is rebuilt from the current
@@ -389,10 +396,6 @@ int main (int argc, char ** argv)
       SpanProjector<LatticeFermionD> Q(V);
       GRID_ASSERT( Q.Ok() );
       ProjectedLinearOperator<LatticeFermionD> QAQ(Q,CountedPVdagM);
-      MrhsProjectedPreconditioner<LatticeFermionD> QM(Q,Solver.ThreeLevelPrecon);
-      MrhsPGCRNonHermitian<LatticeFermionD> GCR(P.CorrTol,P.CorrMaxRestarts,QAQ,QM,P.MultiGrid.Outer.Mmax,P.MultiGrid.Outer.Nstep);
-      GCR.Name("Fcorrect");
-      GCR.SetZeroGuess(1);
       for(int r=0;r<P.CorrNrhs;r++){
         vold[r] = V[b0+r];
         CountedPVdagM.Op(vold[r],rhs[r]);
@@ -401,9 +404,25 @@ int main (int argc, char ** argv)
         Q.Complement(rhs[r],rhs[r]);
       }
       RealD t_batch = -usecond();
-      GCR(rhs,w);
+      RealD batch_steps = 0.0;
+      if ( P.CorrPrecon=="mg" ) {
+        MrhsProjectedPreconditioner<LatticeFermionD> QM(Q,Solver->ThreeLevelPrecon);
+        MrhsPGCRNonHermitian<LatticeFermionD> GCR(P.CorrTol,P.CorrMaxRestarts,QAQ,QM,P.MultiGrid.Outer.Mmax,P.MultiGrid.Outer.Nstep);
+        GCR.Name("Fcorrect");
+        GCR.SetZeroGuess(1);
+        GCR(rhs,w);
+        batch_steps = GCR.steps;
+      } else {
+        TrivialPrecon<LatticeFermionD> simple;
+        PrecGeneralisedConjugateResidualNonHermitian<LatticeFermionD> GCR(P.CorrTol,P.CorrMaxRestarts,QAQ,simple,P.CorrKrylovNstep,P.CorrKrylovNstep);
+        for(int r=0;r<P.CorrNrhs;r++){
+          w[r] = Zero();
+          GCR(rhs[r],w[r]);
+          batch_steps += (RealD)GCR.Steps()/P.CorrNrhs;
+        }
+      }
       t_batch = (t_batch+usecond())/1.0e6;
-      steps += (RealD)GCR.steps*P.CorrNrhs/NBASIS;
+      steps += batch_steps*P.CorrNrhs/NBASIS;
       RealD wratio = 0.0;
       for(int r=0;r<P.CorrNrhs;r++){
         wratio += std::sqrt(norm2(w[r])/norm2(vold[r]))/P.CorrNrhs;
@@ -411,7 +430,7 @@ int main (int argc, char ** argv)
         V[b0+r] = V[b0+r]*std::pow(norm2(V[b0+r]),-0.5);
       }
       std::cout << GridLogMessage << "QHMC-CORRECT traj " << traj << " step " << step << " first " << b0
-                << " steps " << GCR.steps << " seconds " << t_batch << " wratio " << wratio
+                << " steps " << batch_steps << " seconds " << t_batch << " wratio " << wratio
                 << " free_solver_MB " << mem_solver << " free_batch_MB " << FreeDeviceMB() << std::endl;
     }
     return steps;
