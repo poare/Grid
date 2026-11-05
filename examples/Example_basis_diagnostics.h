@@ -57,7 +57,7 @@ void BasisNulliness(std::vector<Field> &V, LinearOperatorBase<Field> &A,
     A.Op(V[b],Av);
     RealD n2 = norm2(V[b]);
     nul[b] = std::sqrt(norm2(Av) / n2);
-    rq[b]  = std::abs(innerProduct(V[b],Av)) / n2;
+    rq[b]  = abs(innerProduct(V[b],Av)) / n2;   // ComplexD is thrust::complex on GPU builds
   }
 }
 
@@ -76,7 +76,7 @@ Eigen::MatrixXcd BasisCrossGram(std::vector<FieldW> &W, std::vector<Field> &V)
   for (size_t i = 0; i < W.size(); i++) {
     BasisFieldCopy(W[i],w);
     innerProductMulti(ip,Vp,w);                     // ip[j] = <V_j|W_i>
-    for (size_t j = 0; j < V.size(); j++) G(i,j) = std::conj(ip[j]);
+    for (size_t j = 0; j < V.size(); j++) G(i,j) = conjugate(ip[j]);
   }
   return G;
 }
