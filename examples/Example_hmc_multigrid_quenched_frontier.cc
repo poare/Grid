@@ -61,6 +61,14 @@ Author: Patrick Oare
 //                    from the current basis for each batch (no copy of the
 //                    old one), an O(eps^2) change.  Then the same rebuild and
 //                    the same restore on rejection.
+//                    CorrOperator new (default): A on the left is A(U), and the
+//                    V-cycle has its fine level at U and its coarse operators
+//                    from the last update.  CorrOperator old: A on the left is
+//                    A(U at the last update), the operator the basis and the
+//                    V-cycle were built for; equal at first order.
+//                    CorrRecoarsen 1 (CorrOperator new only): the coarse
+//                    operators are rebuilt on the current basis at U before
+//                    the V-cycle is built, so it is consistent with A(U).
 //   Mode control     no MG (RunMultiGrid 0): the same system PV^dag M x = b
 //                    at U by Krylov.  PV^dag y = b by CG on PV^dag PV (y = PV z),
 //                    then M x = y by red-black CG to Outer.Tol on the Schur
@@ -149,6 +157,8 @@ struct QuenchedHMCDriverParams : Serializable {
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
                                   int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
+                                  std::string, CorrOperator,    // Mode perturbative: new (A(U) on the left) or old (A at the last update)
+                                  int,         CorrRecoarsen,   // Mode perturbative, CorrOperator new: 1 rebuilds the coarse operators at U before the V-cycle
                                   std::string, CorrPrecon,      // Mode perturbative: mg (mrhs GCR, V-cycle) or none (plain GCR per vector)
                                   int,         CorrKrylovNstep, // CorrPrecon none: GCR(Nstep,Nstep), CorrMaxRestarts restarts
                                   int,         DiagEvery,       // >0: QHMC-DIAG basis diagnostics after setup and at solves with step%DiagEvery==0
@@ -161,7 +171,7 @@ struct QuenchedHMCDriverParams : Serializable {
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
       Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), NoiseBasis(0),
-      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrPrecon("mg"), CorrKrylovNstep(10),
+      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrOperator("new"), CorrRecoarsen(0), CorrPrecon("mg"), CorrKrylovNstep(10),
       DiagEvery(0), DiagTest(10), DiagTestRegen(0), DiagReference(1) {};
 };
 
@@ -194,6 +204,8 @@ int main (int argc, char ** argv)
     GRID_ASSERT( (P.Mode!="recoarsen" && P.Mode!="refresh" && P.Mode!="perturbative") || P.MultiGrid.Setup.RetainSubspace );
     GRID_ASSERT( P.Mode!="perturbative" || NBASIS%P.CorrNrhs==0 );
     GRID_ASSERT( P.CorrPrecon=="mg" || P.CorrPrecon=="none" );
+    GRID_ASSERT( P.CorrOperator=="new" || P.CorrOperator=="old" );
+    GRID_ASSERT( !P.CorrRecoarsen || P.CorrOperator=="new" );
     GRID_ASSERT( !P.DiagEvery || (P.RunMultiGrid && P.MultiGrid.Setup.RetainSubspace) );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
@@ -258,6 +270,7 @@ int main (int argc, char ** argv)
 
   MatvecCounter counter;
   CountingLinearOperator<LatticeFermionD> CountedPVdagM(PVdagM,counter);
+  CountingLinearOperator<LatticeFermionD> CountedPVdagMLast(PVdagMLast,counter);
 
   typedef PVdagMMultiGridCoarsening<vSpinColourVector,CoarseScalar_t,NBASIS> Coarsening_t;
   std::cout << GridLogMessage << "Coarse sector precision (compiled): "
@@ -271,6 +284,22 @@ int main (int argc, char ** argv)
   precisionChange(UmuF,Umu);
   MobiusFermionF DdwfF(UmuF,*FGridsF.FGridF,*FGridsF.FrbGridF,*FGridsF.UGridF,*FGridsF.UrbGridF,P.Mass,P.M5,P.MobiusB,P.MobiusC);
   MobiusFermionF DpvF (UmuF,*FGridsF.FGridF,*FGridsF.FrbGridF,*FGridsF.UGridF,*FGridsF.UrbGridF,1.0,   P.M5,P.MobiusB,P.MobiusC);
+
+  // The fp32 operators at the U of the last update: the fine level of the
+  // correction's V-cycle under CorrOperator old
+  LatticeGaugeFieldF UmuLastF(FGridsF.UGridF);
+  UmuLastF = UmuF;
+  MobiusFermionF DdwfLastF(UmuLastF,*FGridsF.FGridF,*FGridsF.FrbGridF,*FGridsF.UGridF,*FGridsF.UrbGridF,P.Mass,P.M5,P.MobiusB,P.MobiusC);
+  MobiusFermionF DpvLastF (UmuLastF,*FGridsF.FGridF,*FGridsF.FrbGridF,*FGridsF.UGridF,*FGridsF.UrbGridF,1.0,   P.M5,P.MobiusB,P.MobiusC);
+  // The last-update operators follow U, in both precisions
+  auto ImportLast = [&]()
+  {
+    DdwfLast.ImportGauge(Umu);
+    DpvLast.ImportGauge(Umu);
+    precisionChange(UmuLastF,Umu);
+    DdwfLastF.ImportGauge(UmuLastF);
+    DpvLastF.ImportGauge(UmuLastF);
+  };
 
   Coarsening_t  Coarsening(CGrids, FGridsF, P.MultiGrid.Setup);
 
@@ -460,9 +489,24 @@ int main (int argc, char ** argv)
     std::vector<LatticeFermionD> &V = Coarsening.rawNull;
     // CorrPrecon none needs no MG solver: plain GCR on QAQ per vector, as the
     // refresh's GCR(10,10) but on the correction equation.
+    // CorrOperator old: A on the left and the V-cycle's fine level both at the
+    // last update's U, where the basis and the coarse operators were built.
+    const bool old = ( P.CorrOperator=="old" );
+    LinearOperatorBase<LatticeFermionD> &Acorr = old ? (LinearOperatorBase<LatticeFermionD> &)CountedPVdagMLast
+                                                     : (LinearOperatorBase<LatticeFermionD> &)CountedPVdagM;
+    // CorrRecoarsen: the coarse operators at U on the current basis first, so
+    // the V-cycle is consistent with A(U); SolveAtU rebuilds again after the update
+    if ( P.CorrRecoarsen && P.CorrPrecon=="mg" ) {
+      RealD t_rc = -usecond();
+      Rebuild();
+      t_rc = (t_rc+usecond())/1.0e6;
+      std::cout << GridLogMessage << "QHMC-CORR-RECOARSEN traj " << traj << " step " << step << " seconds " << t_rc << std::endl;
+    }
     std::unique_ptr<PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t>> Solver;
-    if ( P.CorrPrecon=="mg" )
-      Solver.reset(new PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t>(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.CorrNrhs));
+    if ( P.CorrPrecon=="mg" ) {
+      if ( old ) Solver.reset(new PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t>(DdwfLast,DpvLast,DdwfLastF,DpvLastF,Coarsening,P.MultiGrid,P.CorrNrhs));
+      else       Solver.reset(new PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t>(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.CorrNrhs));
+    }
     RealD mem_solver = FreeDeviceMB();
 
     // No copy of the old basis (60 fine fields): Q is rebuilt from the current
@@ -475,7 +519,7 @@ int main (int argc, char ** argv)
     for(int b0=0;b0<NBASIS;b0+=P.CorrNrhs){
       SpanProjector<LatticeFermionD> Q(V);
       GRID_ASSERT( Q.Ok() );
-      ProjectedLinearOperator<LatticeFermionD> QAQ(Q,CountedPVdagM);
+      ProjectedLinearOperator<LatticeFermionD> QAQ(Q,Acorr);
       for(int r=0;r<P.CorrNrhs;r++){
         vold[r] = V[b0+r];
         CountedPVdagM.Op(vold[r],rhs[r]);
@@ -575,10 +619,7 @@ int main (int argc, char ** argv)
               << " free_start_MB " << mem_start << " free_update_MB " << mem_update
               << " free_rebuild_MB " << mem_rebuild << " free_solve_MB " << mem_solve
               << " grid_cache_MB " << (MemoryManager::DeviceCacheBytes()>>20) << std::endl;
-    if ( P.Mode=="perturbative" ) {
-      DdwfLast.ImportGauge(Umu);
-      DpvLast.ImportGauge(Umu);
-    }
+    if ( P.Mode=="perturbative" ) ImportLast();
   };
   auto ControlAtU = [&](int traj,int step,RealD t_MD)
   {
@@ -627,10 +668,7 @@ int main (int argc, char ** argv)
       const bool solves = SolvesIn(t);
       std::vector<LatticeFermionD> Vstart;
       if ( updates && P.Ntraj>1 ) Vstart = Coarsening.rawNull;
-      if ( P.Mode=="perturbative" ) {
-        DdwfLast.ImportGauge(Umu);
-        DpvLast.ImportGauge(Umu);
-      }
+      if ( P.Mode=="perturbative" ) ImportLast();
       if ( solves ) for(int r=0;r<P.Nrhs;r++) gaussian(RNG5,mdsrc[r]);
       RealD t_traj = -usecond();
       MD.refresh(Umu,sRNG,RNG4);
