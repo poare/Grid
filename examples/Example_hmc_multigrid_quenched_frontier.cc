@@ -91,6 +91,7 @@ Author: Patrick Oare
 #include <Grid/algorithms/multigrid/PVdagMMultiGrid.h>
 #include "Example_mg_hmc.h"
 #include "Example_mg_refine.h"
+#include "Example_basis_diagnostics.h"
 
 using namespace std;
 using namespace Grid;
@@ -150,13 +151,18 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         CorrNrhs,        // Mode perturbative: batch size, divides the basis size
                                   std::string, CorrPrecon,      // Mode perturbative: mg (mrhs GCR, V-cycle) or none (plain GCR per vector)
                                   int,         CorrKrylovNstep, // CorrPrecon none: GCR(Nstep,Nstep), CorrMaxRestarts restarts
+                                  int,         DiagEvery,       // >0: QHMC-DIAG basis diagnostics after setup and at solves with step%DiagEvery==0
+                                  int,         DiagTest,        // DiagEvery: test vectors from fresh noise, made as the setup's; 0: none
+                                  int,         DiagTestRegen,   // DiagEvery: 1 makes new test vectors at every diagnostic (moving field); 0 once, after setup
+                                  int,         DiagReference,   // DiagEvery: 1 keeps an fp32 copy of the starting basis for angles and ref_loc
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
       Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), NoiseBasis(0),
-      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrPrecon("mg"), CorrKrylovNstep(10) {};
+      CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrPrecon("mg"), CorrKrylovNstep(10),
+      DiagEvery(0), DiagTest(10), DiagTestRegen(0), DiagReference(1) {};
 };
 
 int main (int argc, char ** argv)
@@ -188,6 +194,7 @@ int main (int argc, char ** argv)
     GRID_ASSERT( (P.Mode!="recoarsen" && P.Mode!="refresh" && P.Mode!="perturbative") || P.MultiGrid.Setup.RetainSubspace );
     GRID_ASSERT( P.Mode!="perturbative" || NBASIS%P.CorrNrhs==0 );
     GRID_ASSERT( P.CorrPrecon=="mg" || P.CorrPrecon=="none" );
+    GRID_ASSERT( !P.DiagEvery || (P.RunMultiGrid && P.MultiGrid.Setup.RetainSubspace) );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
@@ -281,6 +288,70 @@ int main (int argc, char ** argv)
     Coarsening.BuildDenseBottom();
   };
 
+  //////////////////////////////////////////////////////////////////////
+  // Basis diagnostics (DiagEvery > 0), one QHMC-DIAG line and QHMC-DIAG-LIST
+  // lines per call, on the raw basis and the coarsening built from it:
+  //   nul, rq       ||A v||/||v|| and |<v|A v>|/|v|^2 of the basis vectors
+  //   sin2, cos     principal angles to the reference (the starting basis):
+  //                 mean sin^2, smallest cosine, cosines above 0.99 and 0.9
+  //   ref_loc/glob  ||(1 - P P^dag) w||/||w|| and ||Q w||/||w|| for the
+  //                 reference vectors w, P the current block prolongator
+  //   test_*        the same, and ||A t||/||t||, for DiagTest vectors made
+  //                 from fresh noise as the setup makes its basis
+  // Uses PVdagM, not the counted operator, so update_matvecs is unchanged.
+  // Device memory: the reference is NBASIS fp32 fields (half the basis), the
+  // test vectors DiagTest fp64 fields, the chunks of the projection below
+  // 2 x 10 fp64 fields more while they run.
+  //////////////////////////////////////////////////////////////////////
+  GridParallelRNG RNGtest(FGrid); RNGtest.SeedFixedIntegers({17,18,19,20});  // diagnostic test vectors only
+  std::vector<LatticeFermionF> DiagRef;
+  std::vector<LatticeFermionD> DiagT;
+  Eigen::MatrixXcd DiagGW;
+  const int DiagChunk = 10;
+  auto Diagnose = [&](int traj,int step)
+  {
+    if ( !P.DiagEvery || step%P.DiagEvery ) return;
+    RealD t_diag = -usecond();
+    std::vector<LatticeFermionD> &V = Coarsening.rawNull;
+    SpanProjector<LatticeFermionD> Q(V);
+    GRID_ASSERT( Q.Ok() );
+    std::vector<RealD> nul, rq;
+    BasisNulliness(V,PVdagM,nul,rq);
+    std::ostringstream line, lists;
+    line.precision(6);
+    line << "QHMC-DIAG traj " << traj << " step " << step << BasisStat("nul",nul) << BasisStat("rq",rq);
+    lists << "QHMC-DIAG-LIST traj " << traj << " step " << step << " nul " << BasisList(nul) << " rq " << BasisList(rq);
+    if ( DiagRef.size() ) {
+      Eigen::MatrixXcd GV = BasisCrossGram(V,V);
+      Eigen::MatrixXcd C  = BasisCrossGram(DiagRef,V);
+      std::vector<RealD> cosv = PrincipalCosines(DiagGW,GV,C);
+      RealD sin2 = 0.0;
+      int n99 = 0, n90 = 0;
+      for(auto c : cosv){ sin2 += (1.0-c*c)/cosv.size(); n99 += (c>0.99); n90 += (c>0.9); }
+      std::vector<RealD> loc, glob;
+      BasisRepresentation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,Q,FGrid,CGrids.Coarse5d,
+                                                                       DiagRef,DiagChunk,loc,glob);
+      line << " sin2_mean " << sin2 << " cos_min " << cosv.back() << " n_cos99 " << n99 << " n_cos90 " << n90
+           << BasisStat("ref_loc",loc) << BasisStat("ref_glob",glob);
+      lists << " cos " << BasisList(cosv) << " ref_loc " << BasisList(loc);
+    }
+    if ( P.DiagTest>0 ) {
+      if ( DiagT.empty() || P.DiagTestRegen ) {
+        DiagT.assign(P.DiagTest,LatticeFermionD(FGrid));
+        BasisTestVectors(DiagT,PVdagM,RNGtest);
+      }
+      std::vector<RealD> loc, glob, tnul, trq;
+      BasisRepresentation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,Q,FGrid,CGrids.Coarse5d,
+                                                                       DiagT,DiagChunk,loc,glob);
+      BasisNulliness(DiagT,PVdagM,tnul,trq);
+      line << BasisStat("test_loc",loc) << BasisStat("test_glob",glob) << BasisStat("test_nul",tnul);
+      lists << " test_loc " << BasisList(loc) << " test_nul " << BasisList(tnul);
+    }
+    t_diag = (t_diag+usecond())/1.0e6;
+    std::cout << GridLogMessage << line.str() << " seconds " << t_diag << std::endl;
+    std::cout << GridLogMessage << lists.str() << std::endl;
+  };
+
   if ( P.RunMultiGrid ) {
     //////////////////////////////////////////////////////////////////////
     // 1. Basis: generate (or load), then save a generated one
@@ -297,6 +368,14 @@ int main (int argc, char ** argv)
       saveSubspace(Coarsening.rawNull, P.SaveSubspace);
       t_save = (t_save+usecond())/1.0e6;
       std::cout << GridLogMessage << "QHMC-SAVE " << P.SaveSubspace << " seconds " << t_save << std::endl;
+    }
+
+    // The reference for the diagnostics: the basis as loaded or generated,
+    // before NoiseBasis replaces it
+    if ( P.DiagEvery && P.DiagReference ) {
+      DiagRef.assign(NBASIS,LatticeFermionF(FGridsF.FGridF));
+      for(int b=0;b<NBASIS;b++) precisionChange(DiagRef[b],Coarsening.rawNull[b]);
+      DiagGW = BasisCrossGram(Coarsening.rawNull,Coarsening.rawNull);
     }
 
     // The A^{-k} scan from k = 0: noise in place of the basis, so that each
@@ -321,6 +400,7 @@ int main (int argc, char ** argv)
     Coarsening.CertifyCoarsening(PVdagM);
     std::cout << GridLogMessage << "QHMC-SETUP coarsen_seconds " << t_coarsen
               << " dense_seconds " << t_dense << std::endl;
+    Diagnose(0,0);
 
     //////////////////////////////////////////////////////////////////////
     // 3. Solves: mrhs then (optionally) single RHS through the SAME objects
@@ -477,6 +557,7 @@ int main (int argc, char ** argv)
     RealD mem_rebuild = FreeDeviceMB();
     RealD null_resid = InvarianceResidual(Coarsening.rawNull,PVdagM);
     RealD gram_cond  = SpanProjector<LatticeFermionD>(Coarsening.rawNull).GramCondition();
+    Diagnose(traj,step);
 
     RealD t_solve = -usecond();
     PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
