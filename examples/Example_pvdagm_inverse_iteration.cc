@@ -103,8 +103,11 @@ struct InverseIterationParams : Serializable {
   InverseIterationParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5), Config(""),
       KMax(20), RoundTol(5.0e-4), RoundMaxOuter(30),
-      CensusK({0,1,2,3,4,5,7,10,14,20}), CensusNstop(60), CensusNk(96), CensusNm(192),
-      CensusTol(1.0e-5), CensusMaxIt(10), ChebyLo(4.0), ChebyHi(0.0), ChebyOrder(401),
+      // Nstop 96: CHECK A needs modes past Nbasis2 and CHECK B past NBASIS, as
+      // Peter's coherence run (NEV 96) needed from his census.  CensusK and the
+      // restart cap are a node-hour budget: under-filtered, setup, over-filtered.
+      CensusK({2,3,5,10,20}), CensusNstop(96), CensusNk(128), CensusNm(160),
+      CensusTol(1.0e-5), CensusMaxIt(4), ChebyLo(4.0), ChebyHi(0.0), ChebyOrder(401),
       Nbasis2(48)
   {
     // Peter's P0 cell, as the p0 set of run_hmc_multigrid_quenched_frontier.job;
@@ -259,6 +262,172 @@ int main (int argc, char ** argv)
                 << " inv_resid " << inv << std::endl;
       std::cout << GridLogMessage << "II-NUL-LIST k " << k << " nul " << BasisList(nul)
                 << " rq " << BasisList(rq) << std::endl;
+    }
+
+    //////////////////////////////////////////////////////////////////////
+    // 4. Peter's coarse census and coherence checks on A_c(V_k)
+    //    (Example_pvdagm_census.cc CENSUS 1, 3, 4; Example_pvdagm_coherence.cc
+    //    CHECK 0, 1, A, B), on the production coarse operator.  A_c^dag comes
+    //    from coarsening A^dag on the same basis, never from Mdag (which is M).
+    //////////////////////////////////////////////////////////////////////
+    if ( std::find(P.CensusK.begin(),P.CensusK.end(),k) != P.CensusK.end() ) {
+      typedef Coarsening_t::CoarseOperator     CoarseOp_t;
+      typedef Coarsening_t::CoarseVector       CoarseVector;
+      typedef Lattice<iScalar<CoarseScalar_t> > CoarseCoarseScalar;
+      GridCartesian *C5  = CGrids.Coarse5d;
+      GridCartesian *CC5 = CGrids.CoarseCoarse5d;   // Block2 blocks of the coarse lattice
+      RealD t_census = -usecond();
+
+      // A_c^dag.  CoarsenOperator re-imports the basis into the coarsening's
+      // own projector: the same raw basis, orthonormalised the same way, so P
+      // is unchanged, and no second ~nbasis-field store is allocated.
+      RealD t_adj = -usecond();
+      CoarseOp_t CoarseOpAdj(Coarsening.geom,C5);
+      {
+        PVdagMAdjointOperator<MobiusFermionD,LatticeFermionD> PVdagMAdj(PVdagM);
+        std::vector<LatticeFermionD> sub(V);
+        CoarseOpAdj.SetGrid(CGrids.CoarseBatch);
+        PVdagMAdj.SloppyComms(P.MultiGrid.Setup.FineSloppyComms);
+        CoarseOpAdj.CoarsenOperator(PVdagMAdj,sub,C5,CGrids.batch,Coarsening.MrhsProjectorL1);
+        PVdagMAdj.SloppyComms(0);
+        Coarsening.MrhsProjectorL1.ReleaseScratch();
+      }
+      Coarsening.SetNrhs(1);
+      CoarseOpAdj.SetGrid(Coarsening.CMrhs);
+      t_adj = (t_adj+usecond())/1.0e6;
+
+      CoarseSliceOperator<CoarseOp_t> Ac(Coarsening.CoarseOpPV,CoarseOpAdj,C5,Coarsening.CMrhs);
+      GridParallelRNG CRNG(C5); CRNG.SeedFixedIntegers({5,6,7,8});
+
+      // CENSUS 1.  O(1) if AdjOp were not the adjoint; the threshold allows
+      // for the sloppy-halo coarsening of both operators at many ranks.
+      RealD mismatch = AdjointMismatch(Ac,CRNG,C5);
+      std::cout << GridLogMessage << "II-ADJCHECK k " << k << " mismatch " << mismatch << std::endl;
+      GRID_ASSERT( mismatch < 1.0e-6 );
+
+      // CENSUS 3 and 4: sigma_max^2, then Chebyshev-filtered Lanczos on A_c^dag A_c
+      CoarseVector x0(C5);
+      random(CRNG,x0);
+      PowerMethod<CoarseVector> PM;
+      RealD sigmax2 = PM(Ac,x0);
+      RealD cheby_hi = ( P.ChebyHi > 0.0 ) ? P.ChebyHi : 1.1*sigmax2;
+
+      RealD t_lanczos = -usecond();
+      std::vector<RealD>        eval(P.CensusNm);
+      std::vector<CoarseVector> evec(P.CensusNm,C5);
+      int Nconv = 0;
+      {
+        Chebyshev<CoarseVector>      Cheby(P.ChebyLo,cheby_hi,P.ChebyOrder);
+        FunctionHermOp<CoarseVector> OpCheby(Cheby,Ac);
+        PlainHermOp<CoarseVector>    Op(Ac);
+        ImplicitlyRestartedLanczos<CoarseVector> IRL(OpCheby,Op,P.CensusNstop,P.CensusNk,P.CensusNm,P.CensusTol,P.CensusMaxIt);
+        random(CRNG,x0);
+        IRL.calc(eval,evec,x0,Nconv);   // at the restart cap it still returns Nstop Ritz vectors
+      }
+      t_lanczos = (t_lanczos+usecond())/1.0e6;
+      const int nev = evec.size();
+      GRID_ASSERT( P.Nbasis2 < nev );
+
+      // CHECK 0 (sigma and left/right alignment) and the residuals
+      std::vector<RealD> sigma2(nev), resid(nev), sigma(nev), align(nev);
+      {
+        CoarseVector Av(C5), Hv(C5);
+        for(int j=0;j<nev;j++){
+          Ac.Op(evec[j],Av);
+          RealD nv  = norm2(evec[j]);
+          RealD nAv = norm2(Av);
+          sigma[j]  = std::sqrt(nAv/nv);
+          align[j]  = abs(innerProduct(Av,evec[j]))/std::sqrt(nAv*nv);   // |<u|v>|, u = A v/||A v||
+          Ac.HermOp(evec[j],Hv);
+          Hv = Hv - eval[j]*evec[j];
+          sigma2[j] = eval[j];
+          resid[j]  = std::sqrt(norm2(Hv)/nv);
+        }
+      }
+
+      // CHECK 1: overlap of each mode with the GLOBAL span of the 60 psi_c
+      std::vector<RealD> overlap(nev);
+      {
+        std::vector<CoarseVector> Qc(Coarsening.rawPsi);
+        for(int i=0;i<NBASIS;i++){
+          for(int j=0;j<i;j++){
+            ComplexD ip = innerProduct(Qc[j],Qc[i]);
+            Qc[i] = Qc[i] - ip*Qc[j];
+          }
+          Qc[i] = Qc[i]*std::pow(norm2(Qc[i]),-0.5);
+        }
+        for(int j=0;j<nev;j++){
+          RealD ov = 0.0;
+          for(int i=0;i<NBASIS;i++){
+            ComplexD ip = innerProduct(Qc[i],evec[j]);
+            ov += real(ip*conjugate(ip));
+          }
+          overlap[j] = ov/norm2(evec[j]);
+        }
+      }
+
+      // CHECK A: the lowest Nbasis2 modes, blocked on Block2; completeness of the rest
+      std::vector<RealD> compA, gsAglob, gsAmin;
+      RealD idemA, meanA = 0.0;
+      {
+        std::vector<CoarseVector> basisA(evec.begin(),evec.begin()+P.Nbasis2);
+        blockGSCensus<CoarseVector,CoarseCoarseScalar>(basisA,CC5,"A",gsAglob,gsAmin);
+        CoarseVector w(C5), w2(C5);
+        blockPPdag<CoarseVector,CoarseCoarseScalar>(basisA,CC5,evec[P.Nbasis2],w);
+        blockPPdag<CoarseVector,CoarseCoarseScalar>(basisA,CC5,w,w2);
+        w2 = w2 - w;
+        idemA = std::sqrt(norm2(w2)/norm2(w));
+        for(int j=P.Nbasis2;j<nev;j++){
+          blockPPdag<CoarseVector,CoarseCoarseScalar>(basisA,CC5,evec[j],w);
+          compA.push_back(norm2(w)/norm2(evec[j]));
+          meanA += compA.back()/(nev-P.Nbasis2);
+        }
+      }
+
+      // CHECK B: the 60 psi_c, blocked on Block2; completeness of every mode
+      std::vector<RealD> compB, gsBglob, gsBmin;
+      RealD idemB, meanBlow = 0.0, meanBhigh = 0.0;
+      {
+        std::vector<CoarseVector> basisB(Coarsening.rawPsi);
+        blockGSCensus<CoarseVector,CoarseCoarseScalar>(basisB,CC5,"B",gsBglob,gsBmin);
+        CoarseVector w(C5), w2(C5);
+        blockPPdag<CoarseVector,CoarseCoarseScalar>(basisB,CC5,evec[0],w);
+        blockPPdag<CoarseVector,CoarseCoarseScalar>(basisB,CC5,w,w2);
+        w2 = w2 - w;
+        idemB = std::sqrt(norm2(w2)/norm2(w));
+        int nlow = 0, nhigh = 0;
+        for(int j=0;j<nev;j++){
+          blockPPdag<CoarseVector,CoarseCoarseScalar>(basisB,CC5,evec[j],w);
+          compB.push_back(norm2(w)/norm2(evec[j]));
+          if ( j < NBASIS ) { meanBlow  += compB.back(); nlow++;  }
+          else              { meanBhigh += compB.back(); nhigh++; }
+        }
+        meanBlow  = nlow  ? meanBlow/nlow   : NAN;
+        meanBhigh = nhigh ? meanBhigh/nhigh : NAN;
+      }
+
+      CoarseOpAdj.ReleaseGrid();   // CMrhs belongs to the coarsening and outlives it
+      t_census = (t_census+usecond())/1.0e6;
+
+      std::cout << GridLogMessage << "II-CENSUS k " << k << " sigma2_max " << sigmax2 << " cheby_hi " << cheby_hi
+                << " nconv " << Nconv << " nev " << nev << " adj_mismatch " << mismatch
+                << " adj_coarsen_seconds " << t_adj << " lanczos_seconds " << t_lanczos
+                << " seconds " << t_census << std::endl;
+      std::cout << GridLogMessage << "II-CENSUS-LIST k " << k << " sigma2 " << BasisList(sigma2)
+                << " resid " << BasisList(resid) << std::endl;
+      std::cout << GridLogMessage << "II-CHECK0-LIST k " << k << " sigma " << BasisList(sigma)
+                << " align " << BasisList(align) << std::endl;
+      std::cout << GridLogMessage << "II-CHECK1-LIST k " << k << " overlap " << BasisList(overlap) << std::endl;
+      std::cout << GridLogMessage << "II-CHECKA k " << k << " nbasis2 " << P.Nbasis2 << " mean " << meanA
+                << " idempotency " << idemA << std::endl;
+      std::cout << GridLogMessage << "II-CHECKA-LIST k " << k << " comp " << BasisList(compA) << std::endl;
+      std::cout << GridLogMessage << "II-CHECKB k " << k << " mean_low " << meanBlow << " mean_high " << meanBhigh
+                << " idempotency " << idemB << std::endl;
+      std::cout << GridLogMessage << "II-CHECKB-LIST k " << k << " comp " << BasisList(compB) << std::endl;
+      std::cout << GridLogMessage << "II-GS-LIST k " << k << " A_glob " << BasisList(gsAglob)
+                << " A_minblock " << BasisList(gsAmin) << " B_glob " << BasisList(gsBglob)
+                << " B_minblock " << BasisList(gsBmin) << std::endl;
+      Coarsening.ReportDeviceFootprint("after census");
     }
 
     //////////////////////////////////////////////////////////////////////
