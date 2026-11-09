@@ -262,6 +262,21 @@ int main (int argc, char ** argv)
                 << " inv_resid " << inv << std::endl;
       std::cout << GridLogMessage << "II-NUL-LIST k " << k << " nul " << BasisList(nul)
                 << " rq " << BasisList(rq) << std::endl;
+
+      // The same question for the span rather than the raw vectors: the
+      // nulliness of the Gram-Schmidt orthonormalised basis (index order), and
+      // the singular values of A on span V_k, which no choice of basis changes
+      RealD t_span = -usecond();
+      std::vector<RealD> s, ortho;
+      SpanNulliness(V,PVdagM,s,ortho);
+      t_span = (t_span+usecond())/1.0e6;
+      RealD s2mean = 0.0;
+      for (auto x : s) s2mean += x*x/s.size();
+      std::cout << GridLogMessage << "II-SPAN k " << k << " s_min " << s.front() << " s_max " << s.back()
+                << " s_rms " << std::sqrt(s2mean) << BasisStat("ortho",ortho)
+                << " seconds " << t_span << std::endl;
+      std::cout << GridLogMessage << "II-SPAN-LIST k " << k << " s " << BasisList(s)
+                << " ortho " << BasisList(ortho) << std::endl;
     }
 
     //////////////////////////////////////////////////////////////////////

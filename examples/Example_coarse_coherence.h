@@ -22,6 +22,7 @@
 #pragma once
 
 #include <Grid/Grid.h>
+#include <Grid/Grid_Eigen_Dense.h>
 #include <Grid/algorithms/multigrid/PVdagMOperators.h>
 
 NAMESPACE_BEGIN(Grid);
@@ -122,6 +123,54 @@ RealD AdjointMismatch(LinearOperatorBase<Field> &A, GridParallelRNG &RNG, GridBa
   ComplexD l = innerProduct(y,Ax);
   ComplexD r = innerProduct(Ady,x);
   return abs(l-r)/abs(l);
+}
+
+/**
+ * Nulliness of span(V), n = V.size(), from the Gram matrices
+ *     (G_V)_ij = <v_i|v_j>,   (G_AV)_ij = <A v_i|A v_j> = <v_i|A^dag A v_j>.
+ * With G_V = L L^dag (Cholesky), q = V L^{-dag} is the Gram-Schmidt
+ * orthonormalisation of V in index order, and M = L^{-1} G_AV L^{-dag} is
+ * the matrix of A^dag A in that basis.  Returns
+ *   ortho_i = ||A q_i||       = sqrt(M_ii): nulliness of the orthonormalised basis
+ *   s_1 <= ... <= s_n         = sqrt(eigenvalues of M): the singular values of A
+ *                               restricted to span(V), the same for every basis of
+ *                               the span; s_1 is its most null direction, s_n its least.
+ * sum_i ortho_i^2 = sum_i s_i^2 (the trace).  G_AV is built one column at a
+ * time from A^dag A v_j: 2n applications of A and two temporary fields,
+ * never the n fields A V.  Uses BasisCrossGram (Example_basis_diagnostics.h).
+ */
+template<class Field>
+void SpanNulliness(std::vector<Field> &V, LinearOperatorBase<Field> &A,
+                   std::vector<RealD> &s, std::vector<RealD> &ortho)
+{
+  const int n = V.size();
+  std::vector<const Field *> Vp;
+  for (auto &v : V) Vp.push_back(&v);
+  Field Av(V[0].Grid()), AdAv(V[0].Grid());
+  Eigen::MatrixXcd GV = BasisCrossGram(V,V);
+  Eigen::MatrixXcd GA(n,n);
+  std::vector<ComplexD> ip;
+  for (int j = 0; j < n; j++) {
+    A.Op(V[j],Av);
+    A.AdjOp(Av,AdAv);
+    innerProductMulti(ip,Vp,AdAv);                  // ip[i] = <v_i|A^dag A v_j>
+    for (int i = 0; i < n; i++) GA(i,j) = ip[i];
+  }
+  GV = 0.5*(GV + GV.adjoint());                     // Hermitian to rounding; make it exact
+  GA = 0.5*(GA + GA.adjoint());
+  Eigen::LLT<Eigen::MatrixXcd> llt(GV);
+  GRID_ASSERT( llt.info() == Eigen::Success );      // V linearly dependent to rounding
+  auto L = llt.matrixL();
+  Eigen::MatrixXcd B = L.solve(GA);                 // L^{-1} G_AV
+  Eigen::MatrixXcd M = L.solve(Eigen::MatrixXcd(B.adjoint()));   // L^{-1} G_AV L^{-dag}, as G_AV is Hermitian
+  M = 0.5*(M + M.adjoint());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
+  s.resize(n);
+  ortho.resize(n);
+  for (int i = 0; i < n; i++) {
+    s[i]     = std::sqrt(std::max(es.eigenvalues()(i),0.0));   // ascending
+    ortho[i] = std::sqrt(std::max(M(i,i).real(),0.0));
+  }
 }
 
 //////////////////////////////////////////////////////////////////////
