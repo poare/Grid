@@ -165,6 +165,8 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         DiagTest,        // DiagEvery: test vectors from fresh noise, made as the setup's; 0: none
                                   int,         DiagTestRegen,   // DiagEvery: 1 makes new test vectors at every diagnostic (moving field); 0 once, after setup
                                   int,         DiagReference,   // DiagEvery: 1 keeps an fp32 copy of the starting basis for angles and ref_loc
+                                  std::vector<int>, DiagTestRounds, // DiagTest: depths of the test vectors (rounds of inverse iteration), ascending
+                                  int,         DiagBlockGram,   // DiagEvery: 1 adds the block Gram spectrum of the raw basis (QHMC-DIAG-GRAM)
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
@@ -172,7 +174,7 @@ struct QuenchedHMCDriverParams : Serializable {
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
       Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), NoiseBasis(0),
       CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrOperator("new"), CorrRecoarsen(0), CorrPrecon("mg"), CorrKrylovNstep(10),
-      DiagEvery(0), DiagTest(10), DiagTestRegen(0), DiagReference(1) {};
+      DiagEvery(0), DiagTest(10), DiagTestRegen(0), DiagReference(1), DiagTestRounds({3}), DiagBlockGram(0) {};
 };
 
 int main (int argc, char ** argv)
@@ -207,6 +209,9 @@ int main (int argc, char ** argv)
     GRID_ASSERT( P.CorrOperator=="new" || P.CorrOperator=="old" );
     GRID_ASSERT( !P.CorrRecoarsen || P.CorrOperator=="new" );
     GRID_ASSERT( !P.DiagEvery || (P.RunMultiGrid && P.MultiGrid.Setup.RetainSubspace) );
+    GRID_ASSERT( !P.DiagBlockGram || P.DiagEvery );
+    GRID_ASSERT( P.DiagTestRounds.size()>0 && P.DiagTestRounds[0]>=1 );
+    for(int d=1;d<P.DiagTestRounds.size();d++) GRID_ASSERT( P.DiagTestRounds[d]>P.DiagTestRounds[d-1] );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
@@ -325,21 +330,83 @@ int main (int argc, char ** argv)
   //                 mean sin^2, smallest cosine, cosines above 0.99 and 0.9
   //   ref_loc/glob  ||(1 - P P^dag) w||/||w|| and ||Q w||/||w|| for the
   //                 reference vectors w, P the current block prolongator
-  //   test_*        the same, and ||A t||/||t||, for DiagTest vectors made
-  //                 from fresh noise as the setup makes its basis
+  // and, from the hand-off notes/mg-hmc-peter/BasisColinearityDiagnostic_Handoff.md:
+  //   QHMC-DIAG-TEST  section 3.1, one line per depth in DiagTestRounds: DiagTest
+  //                 test vectors t made from fresh noise as the setup makes its
+  //                 basis, with that many rounds, against the current coarsening:
+  //                 defect ||(1 - P P^dag) t||^2/||t||^2, adefect (the same
+  //                 with A applied), glob ||Q t||^2/||t||^2, nul ||A t||/||t||,
+  //                 and the per-block defect as quantiles over the blocks
+  //   QHMC-DIAG-PREV  the same vectors against the coarsening of the last update,
+  //                 measured before the update (Mode refresh, perturbative): the
+  //                 gain from this update.  DiagTestRegen 1 makes the vectors at
+  //                 the field of each diagnostic, before the update
+  //   QHMC-DIAG-GRAM  section 3.2 (DiagBlockGram 1): per-block spectrum of the
+  //                 column-normalised Gram of the raw basis, as quantiles over blocks
   // Uses PVdagM, not the counted operator, so update_matvecs is unchanged.
   // Device memory: the reference is NBASIS fp32 fields (half the basis), the
-  // test vectors DiagTest fp64 fields, the chunks of the projection below
-  // 2 x 10 fp64 fields more while they run.
+  // test vectors DiagTest x (number of depths) fp32 fields and DiagTest fp64
+  // fields while they are made, the chunks of the projections 2 x 10 fp64
+  // fields more while they run.
   //////////////////////////////////////////////////////////////////////
   GridParallelRNG RNGtest(FGrid); RNGtest.SeedFixedIntegers({17,18,19,20});  // diagnostic test vectors only
   std::vector<LatticeFermionF> DiagRef;
-  std::vector<LatticeFermionD> DiagT;
+  std::vector<LatticeFermionF> DiagT;      // DiagTest vectors per depth, depth-major
+  bool DiagTFresh = false;                 // made at this field, before an update, not yet measured after it
   Eigen::MatrixXcd DiagGW;
   const int DiagChunk = 10;
+  GridCartesian *BlockGrid = P.DiagEvery ? BasisBlockGrid(FGrid,CGrids.Coarse5d) : nullptr;
+  auto DiagStep = [&](int step) -> bool { return P.DiagEvery && step%P.DiagEvery==0; };
+  auto MakeTest = [&]()
+  {
+    DiagT.assign(P.DiagTest*P.DiagTestRounds.size(),LatticeFermionF(FGridsF.FGridF));
+    BasisTestVectors(DiagT,P.DiagTestRounds,PVdagM,FGrid,RNGtest);
+    DiagTFresh = true;
+  };
+  // The test vectors against the current coarsening: one QHMC-DIAG-<tag> line
+  // and one -LIST line per depth
+  auto MeasureTest = [&](const std::string &tag,int traj,int step,SpanProjector<LatticeFermionD> *Q)
+  {
+    for(int d=0;d<P.DiagTestRounds.size();d++){
+      RealD t_meas = -usecond();
+      std::vector<RealD> defect, adefect, glob, nul, p50, p90, bmax;
+      std::vector<std::vector<RealD> > blocks;
+      BasisDefect<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,PVdagM,Q,FGrid,CGrids.Coarse5d,BlockGrid,
+                                                               DiagT,d*P.DiagTest,P.DiagTest,DiagChunk,
+                                                               defect,adefect,glob,nul,blocks);
+      std::string worst;
+      for(auto &b : blocks){
+        std::vector<RealD> q = BasisQuantiles(b,{0.5,0.9,1.0});
+        p50.push_back(q[0]); p90.push_back(q[1]); bmax.push_back(q[2]);
+        worst += (worst.size() ? "," : "") + BasisBlockWorst(BlockGrid,b,1,true);
+      }
+      t_meas = (t_meas+usecond())/1.0e6;
+      std::ostringstream line, list;
+      line << "QHMC-DIAG-" << tag << " traj " << traj << " step " << step << " rounds " << P.DiagTestRounds[d]
+           << BasisStat("defect",defect) << BasisStat("adefect",adefect);
+      if ( Q ) line << BasisStat("glob",glob);
+      line << BasisStat("nul",nul) << BasisStat("blk_p50",p50) << BasisStat("blk_p90",p90) << BasisStat("blk_max",bmax)
+           << " seconds " << t_meas;
+      list << "QHMC-DIAG-" << tag << "-LIST traj " << traj << " step " << step << " rounds " << P.DiagTestRounds[d]
+           << " defect " << BasisList(defect) << " adefect " << BasisList(adefect);
+      if ( Q ) list << " glob " << BasisList(glob);
+      list << " nul " << BasisList(nul) << " blk_p50 " << BasisList(p50) << " blk_p90 " << BasisList(p90)
+           << " blk_max " << BasisList(bmax) << " blk_worst " << worst;
+      std::cout << GridLogMessage << line.str() << std::endl;
+      std::cout << GridLogMessage << list.str() << std::endl;
+    }
+  };
+  // Before an update at a diagnostic step: the test vectors (made now, at this
+  // field, if DiagTestRegen) against the coarsening of the last update
+  auto DiagnoseBefore = [&](int traj,int step)
+  {
+    if ( !DiagStep(step) || P.DiagTest<=0 ) return;
+    if ( DiagT.empty() || P.DiagTestRegen ) MakeTest();
+    MeasureTest("PREV",traj,step,nullptr);
+  };
   auto Diagnose = [&](int traj,int step)
   {
-    if ( !P.DiagEvery || step%P.DiagEvery ) return;
+    if ( !DiagStep(step) ) return;
     RealD t_diag = -usecond();
     std::vector<LatticeFermionD> &V = Coarsening.rawNull;
     SpanProjector<LatticeFermionD> Q(V);
@@ -365,16 +432,32 @@ int main (int argc, char ** argv)
       lists << " cos " << BasisList(cosv) << " ref_loc " << BasisList(loc);
     }
     if ( P.DiagTest>0 ) {
-      if ( DiagT.empty() || P.DiagTestRegen ) {
-        DiagT.assign(P.DiagTest,LatticeFermionD(FGrid));
-        BasisTestVectors(DiagT,PVdagM,RNGtest);
-      }
-      std::vector<RealD> loc, glob, tnul, trq;
-      BasisRepresentation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,Q,FGrid,CGrids.Coarse5d,
-                                                                       DiagT,DiagChunk,loc,glob);
-      BasisNulliness(DiagT,PVdagM,tnul,trq);
-      line << BasisStat("test_loc",loc) << BasisStat("test_glob",glob) << BasisStat("test_nul",tnul);
-      lists << " test_loc " << BasisList(loc) << " test_nul " << BasisList(tnul);
+      if ( DiagT.empty() || (P.DiagTestRegen && !DiagTFresh) ) MakeTest();
+      MeasureTest("TEST",traj,step,&Q);
+      DiagTFresh = false;
+    }
+    if ( P.DiagBlockGram ) {
+      RealD t_gram = -usecond();
+      std::vector<RealD> lmin, kappa, deff, pres;
+      RealD glmin, glmax;
+      BasisBlockGram(V,BlockGrid,lmin,kappa,deff,pres,glmin,glmax);
+      t_gram = (t_gram+usecond())/1.0e6;
+      std::vector<RealD> ql = BasisQuantiles(lmin, {0.0,0.1,0.5});
+      std::vector<RealD> qk = BasisQuantiles(kappa,{0.5,0.9,1.0});
+      std::vector<RealD> qe = BasisQuantiles(deff, {0.0,0.1,0.5,1.0});
+      std::vector<RealD> qp = BasisQuantiles(pres, {0.0,0.1,0.5});
+      std::ostringstream gram;
+      gram.precision(6);
+      gram << "QHMC-DIAG-GRAM traj " << traj << " step " << step << " N " << V.size() << " nblocks " << lmin.size()
+           << " lmin_p0 " << ql[0] << " lmin_p10 " << ql[1] << " lmin_p50 " << ql[2]
+           << " kappa_p50 " << qk[0] << " kappa_p90 " << qk[1] << " kappa_max " << qk[2]
+           << " deff_p0 " << qe[0] << " deff_p10 " << qe[1] << " deff_p50 " << qe[2] << " deff_max " << qe[3]
+           << " pres_p0 " << qp[0] << " pres_p10 " << qp[1] << " pres_p50 " << qp[2]
+           << " glob_lmin " << glmin << " glob_lmax " << glmax << " seconds " << t_gram;
+      std::cout << GridLogMessage << gram.str() << std::endl;
+      std::cout << GridLogMessage << "QHMC-DIAG-GRAM-LIST traj " << traj << " step " << step
+                << " lmin_worst " << BasisBlockWorst(BlockGrid,lmin,10,false)
+                << " pres_worst " << BasisBlockWorst(BlockGrid,pres,10,false) << std::endl;
     }
     t_diag = (t_diag+usecond())/1.0e6;
     std::cout << GridLogMessage << line.str() << " seconds " << t_diag << std::endl;
@@ -568,6 +651,7 @@ int main (int argc, char ** argv)
     DdwfF.ImportGauge(UmuF);
     DpvF.ImportGauge(UmuF);
     t_import = (t_import+usecond())/1.0e6;
+    if ( updates ) DiagnoseBefore(traj,step);
 
     RealD mem_start = FreeDeviceMB();
     RealD null_before = InvarianceResidual(Coarsening.rawNull,PVdagM);
