@@ -19,6 +19,10 @@
     Output:
       ${outDir}/PVdagM_evals.txt = eigenvalues of PV^\dag M, one `$idx $eval $ritz` per line.
       ${outDir}/PVinvM_evals.txt = eigenvalues of PV^{-1} M, same format.
+      ${outDir}/PVdagM_evecs     = the Nk eigenvectors of PV^\dag M, in the order of
+                                   PVdagM_evals.txt, as one SciDAC file (saveSubspace;
+                                   read back with loadSubspace). Needs LIME.
+      ${outDir}/PVinvM_evecs     = the same for PV^{-1} M.
 
     Grid physics library, www.github.com/paboyle/Grid
 
@@ -39,6 +43,7 @@
 
 #include <Grid/Grid.h>
 #include <Grid/algorithms/multigrid/PVdagMOperators.h>
+#include <Grid/algorithms/multigrid/MultiGridIO.h>
 
 using namespace std;
 using namespace Grid;
@@ -174,6 +179,10 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "PV^dag M Krylov-Schur time: " << (t1-t0)/1.0e6 << " s" << std::endl;
   std::cout << GridLogMessage << "PV^dag M eigenvalues: " << std::endl << KSdag.getEvals() << std::endl;
   if (FGrid->IsBoss()) { writeEvals(KSdag, outDir + "/PVdagM_evals.txt"); }
+  {
+    std::vector<LatticeFermionD> evecs = KSdag.getEvecs();
+    saveSubspace(evecs, outDir + "/PVdagM_evecs");      // collective: every rank
+  }
 
   std::cout << GridLogMessage << "*************** PV^-1 M ****************" << std::endl;
   KrylovSchur KSinv(PVinvM, FGrid, KStol, RF);
@@ -183,6 +192,10 @@ int main (int argc, char ** argv)
   std::cout << GridLogMessage << "PV^-1 M Krylov-Schur time: " << (t3-t2)/1.0e6 << " s" << std::endl;
   std::cout << GridLogMessage << "PV^-1 M eigenvalues: " << std::endl << KSinv.getEvals() << std::endl;
   if (FGrid->IsBoss()) { writeEvals(KSinv, outDir + "/PVinvM_evals.txt"); }
+  {
+    std::vector<LatticeFermionD> evecs = KSinv.getEvecs();
+    saveSubspace(evecs, outDir + "/PVinvM_evecs");      // collective: every rank
+  }
 
   std::cout << GridLogMessage << "Done" << std::endl;
   Grid_finalize();
