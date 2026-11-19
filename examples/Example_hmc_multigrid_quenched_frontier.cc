@@ -51,8 +51,9 @@ Author: Patrick Oare
 //                    RefreshOrthonormalise 1 orthonormalises the basis after
 //                    each pass (subspace iteration).  RefreshKick > 0 adds
 //                    Gaussian noise of that size relative to |v| to every
-//                    vector before each pass, from its own RNG so the MD
-//                    sources are unchanged.
+//                    vector once per update, before the first pass, from its
+//                    own RNG so the MD sources are unchanged.  Large kicks
+//                    tend to a fresh setup of RefreshPasses rounds.
 //   Mode perturbative  the first-order update v -> v - w, (Q A Q) w = Q dA v,
 //                    with dA = A(U) - A(U at the last update) and Q the
 //                    projector off the basis: mrhs GCR in batches of CorrNrhs,
@@ -152,7 +153,7 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         RefreshMaxOuter, // Mode refresh: restarts of GCR(10,10) per vector
                                   int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
                                   int,         RefreshOrthonormalise, // Mode refresh: 1 orthonormalises after each pass
-                                  RealD,       RefreshKick,     // Mode refresh: noise before each pass, relative to |v|; 0: none
+                                  RealD,       RefreshKick,     // Mode refresh: noise once per update, before the first pass, relative to |v|; 0: none
                                   int,         NoiseBasis,      // 1: replace the basis by Gaussian noise before coarsening (k = 0)
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
@@ -665,7 +666,7 @@ int main (int argc, char ** argv)
       if ( P.Mode=="refresh" ) {
         std::vector<int> steps;
         for(int p=0;p<P.RefreshPasses;p++){
-          if ( P.RefreshKick>0.0 ) KickBasis(Coarsening.rawNull,RNGkick,P.RefreshKick);
+          if ( p==0 && P.RefreshKick>0.0 ) KickBasis(Coarsening.rawNull,RNGkick,P.RefreshKick);
           steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
           if ( P.RefreshOrthonormalise ) OrthonormaliseBasis(Coarsening.rawNull);
         }
