@@ -558,8 +558,50 @@ class BinaryIO {
     // std::filesystem::resize_file, but that would be Grid's first <filesystem>
     // dependency and needs -lstdc++fs on the older toolchains still in use.
     //////////////////////////////////////////////////////////////////////////
-    GridStopWatch tcreate,ttrunc,tbar,topen,twrite,tclose,tskew;
+    GridStopWatch tcreate,ttrunc,tbar,topen,twrite,tclose,thead,tskew;
     uint64_t need = offset + (uint64_t)grid->_gsites*sizeof(fobj);
+
+    //////////////////////////////////////////////////////////////////////////
+    // No two ranks may write into the same file block at the same time.
+    //
+    // The extents tile the record at arbitrary byte offsets -- the record
+    // starts after a LIME header, and sizeof(fobj) is rarely a power of two --
+    // so the block holding a boundary between two ranks' extents is shared.
+    // A client that caches whole pages without coherence with other clients,
+    // as NFS does, may write back the whole page it touched, and whichever
+    // client lands second replaces the other rank's bytes on that page with
+    // what its own cache held there: zeros. Seen on SDCC /sdcc/u, 2026-11-20:
+    // 154 zero runs across 160 subspace records written from 8 ranks, every
+    // one starting on a 4 KiB page and ending exactly on a rank boundary.
+    //
+    // So each extent is written in two passes. The body, from the first block
+    // boundary inside the extent to its end, goes first: every body starts on
+    // a block boundary, so no two bodies share a block. The head, from the
+    // extent start up to that boundary, goes second, once every body has been
+    // closed (which flushes it to the server) and a barrier has passed. Heads
+    // lie in distinct blocks as long as no extent is shorter than a block;
+    // when one is, the heads are written one rank at a time instead, which
+    // only happens for local volumes too small for the cost to matter.
+    //
+    // The block covers the 4, 16 and 64 KiB page sizes in use.
+    //////////////////////////////////////////////////////////////////////////
+    const uint64_t block = 64*1024;
+    uint64_t nextent = p.extentSites.size();
+    std::vector<uint64_t> lo(nextent), mid(nextent), hi(nextent);   // file byte offsets
+    uint64_t nshort = 0;
+    for(uint64_t e=0;e<nextent;e++){
+      lo[e]  = offset + p.extentGsite[e]*sizeof(fobj);
+      hi[e]  = lo[e]  + p.extentSites[e]*sizeof(fobj);
+      mid[e] = std::min(hi[e], ((lo[e]+block-1)/block)*block);
+      if ( hi[e]-lo[e] < block ) nshort++;
+    }
+    grid->GlobalSum(nshort);
+
+    auto writeRange = [&](std::ofstream &f,uint64_t e,uint64_t from,uint64_t to){
+      if ( to <= from ) return;
+      f.seekp(from);
+      f.write(((char *)&aggregated[p.extentLocal[e]]) + (from-lo[e]),to-from);
+    };
 
     tcreate.Start();
     if ( grid->IsBoss() ) {
@@ -583,14 +625,29 @@ class BinaryIO {
       fout.open(file,std::ios::binary|std::ios::out|std::ios::in);
       topen.Stop();
       twrite.Start();
-      for(uint64_t e=0;e<p.extentSites.size();e++){
-        fout.seekp(offset + p.extentGsite[e]*sizeof(fobj));
-        fout.write((char *)&aggregated[p.extentLocal[e]],p.extentSites[e]*sizeof(fobj));
-      }
+      for(uint64_t e=0;e<nextent;e++) writeRange(fout,e,mid[e],hi[e]);   // bodies
       twrite.Stop();
       tclose.Start();
-      fout.close();   // flushes the stream buffer; does not force writeback
+      fout.close();   // flushes the stream buffer; on NFS, close also flushes to the server
       tclose.Stop();
+
+      thead.Start();
+      grid->Barrier();                // every body is out before any head goes in
+      if ( nshort == 0 ) {
+        fout.open(file,std::ios::binary|std::ios::out|std::ios::in);
+        for(uint64_t e=0;e<nextent;e++) writeRange(fout,e,lo[e],mid[e]);
+        fout.close();
+      } else {
+        for(int r=0;r<grid->ProcessorCount();r++){
+          if ( r == grid->ThisRank() ) {
+            fout.open(file,std::ios::binary|std::ios::out|std::ios::in);
+            for(uint64_t e=0;e<nextent;e++) writeRange(fout,e,lo[e],mid[e]);
+            fout.close();
+          }
+          grid->Barrier();
+        }
+      }
+      thead.Stop();
     } catch (const std::fstream::failure& exc) {
       std::cout << GridLogError << "Error in aggregate write to " << file << std::endl;
       std::cout << GridLogError << "Exception description: " << exc.what() << std::endl;
@@ -622,9 +679,9 @@ class BinaryIO {
 
     std::vector<RealD> us = { (RealD)tcreate.useconds(), (RealD)tbar.useconds(),
                               (RealD)topen.useconds(),   (RealD)twrite.useconds(),
-                              (RealD)tclose.useconds(),  (RealD)tskew.useconds(),
-                              (RealD)ttrunc.useconds() };
-    ReportStages(grid,"write",{"create","barrier","open","seek+write","close","skew","stat+truncate"},us);
+                              (RealD)tclose.useconds(),  (RealD)thead.useconds(),
+                              (RealD)tskew.useconds(),   (RealD)ttrunc.useconds() };
+    ReportStages(grid,"write",{"create","barrier","open","seek+write","close","heads","skew","stat+truncate"},us);
   }
 
   template<class fobj>
