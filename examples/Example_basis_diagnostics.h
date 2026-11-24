@@ -331,15 +331,27 @@ void BasisDefect(Projector &Proj, LinearOperatorBase<Field> &A, SpanProjector<Fi
  *   pres  = min_i N_b ||v_i||_b^2 / ||v_i||^2, 1 when every vector is spread
  *           uniformly; small when some vector is nearly absent from b, which
  *           the column normalisation hides
+ *   gmean = (det C_b)^{1/N} = exp(mean_k log lambda_k), the geometric-mean
+ *           eigenvalue, 1 for orthonormal columns.  det C_b is the product over
+ *           k of the fraction of v_k on b that is new against v_1..v_{k-1}, so
+ *           it falls with every direction that goes to 0, not only the smallest
+ *   rank[t] = #{k : lambda_k > taus[t]}, the numerical rank of C_b at floor taus[t]
+ * logspec[k]: mean over all blocks of log lambda_k(C_b), eigenvalues ascending;
+ * exp(logspec) is the typical sorted spectrum, and sum_k logspec[k] the mean
+ * log det C_b.  Eigenvalues below 1e-16 count as 1e-16 in the logs.
  * glmin, glmax: the extreme eigenvalues of the column-normalised global Gram
  * G = sum_b G_b.  N(N+1)/2 calls of blockInnerProductD; host storage N^2
  * complex numbers per local block.  V must be raw, never block-orthonormalised.
+ * keep, if given, receives the per-block G_b (local blocks, local lexicographic
+ * order) for BasisBlockAngles.
  */
 template<class Field>
 void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
                     std::vector<RealD> &lmin, std::vector<RealD> &kappa,
                     std::vector<RealD> &deff, std::vector<RealD> &pres,
-                    RealD &glmin, RealD &glmax)
+                    std::vector<RealD> &gmean, const std::vector<RealD> &taus,
+                    std::vector<std::vector<RealD> > &rank, std::vector<RealD> &logspec,
+                    RealD &glmin, RealD &glmax, std::vector<Eigen::MatrixXcd> *keep = nullptr)
 {
   typedef std::complex<double> cplx;
   const int n    = V.size();
@@ -374,7 +386,10 @@ void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
   glmin = gl(0);
   glmax = gl(n-1);
 
-  std::vector<RealD> l(nloc), k(nloc), e(nloc), p(nloc);
+  const int nt = taus.size();
+  std::vector<RealD> l(nloc), k(nloc), e(nloc), p(nloc), gm(nloc);
+  std::vector<std::vector<RealD> > r(nt,std::vector<RealD>(nloc));
+  logspec.assign(n,0.0);
   for (int b = 0; b < nloc; b++) {
     Eigen::VectorXd ev = NormalisedEigenvalues(Gb[b]);
     l[b] = ev(0);
@@ -383,11 +398,228 @@ void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
     RealD pm = INFINITY;
     for (int i = 0; i < n; i++) pm = std::min(pm, nb*Gb[b](i,i).real() / G(i,i).real());
     p[b] = pm;
+    RealD ld = 0.0;
+    for (int i = 0; i < n; i++) {
+      RealD li = std::log(std::max(ev(i),1.0e-16));
+      ld += li;
+      logspec[i] += li;
+    }
+    gm[b] = std::exp(ld/n);
+    for (int t = 0; t < nt; t++) {
+      int c = 0;
+      for (int i = 0; i < n; i++) c += (ev(i) > taus[t]);
+      r[t][b] = c;
+    }
   }
+  bgrid->GlobalSumVector(logspec.data(),n);
+  for (auto &x : logspec) x /= nb;
   BasisBlockGather(bgrid,l,lmin);
   BasisBlockGather(bgrid,k,kappa);
   BasisBlockGather(bgrid,e,deff);
   BasisBlockGather(bgrid,p,pres);
+  BasisBlockGather(bgrid,gm,gmean);
+  rank.resize(nt);
+  for (int t = 0; t < nt; t++) BasisBlockGather(bgrid,r[t],rank[t]);
+  if ( keep ) *keep = std::move(Gb);
+}
+
+/**
+ * |<w_i|v_i>| / (|w_i| |v_i|) for each i: how much of each old vector w_i
+ * survives in the new v_i.  W may be stored at lower precision.
+ */
+template<class FieldW, class Field>
+std::vector<RealD> BasisPairCosines(std::vector<FieldW> &W, std::vector<Field> &V)
+{
+  Field w(V[0].Grid());
+  std::vector<RealD> c(V.size());
+  for (size_t i = 0; i < V.size(); i++) {
+    BasisFieldCopy(W[i],w);
+    c[i] = abs(innerProduct(w,V[i])) / std::sqrt(norm2(w)*norm2(V[i]));
+  }
+  return c;
+}
+
+/**
+ * Principal angles between the block spans of two bases (hand-off section
+ * 3.3), per block b.  GW, GV are the per-block Grams of W and V as kept by
+ * BasisBlockGram (local blocks, local lexicographic order) and
+ * C_b(i,j) = <w_i|v_j>_b.  On each side the Gram is column-normalised and
+ * restricted to its eigenvectors above rtol times its largest eigenvalue (the
+ * numerically independent directions, r_W and r_V of them); the cosines are
+ * the singular values of Lambda_W^{-1/2} U_W^dag C' U_V Lambda_V^{-1/2},
+ * min(r_W, r_V) of them.  Per block, gathered:
+ *   sin2 = mean of 1 - cos^2 over the cosines: the fraction of the block span that turned
+ *   cmin = the smallest cosine: the direction that turned most
+ * W may be stored at lower precision: C then carries its rounding, which the
+ * nearly dependent directions amplify by up to (lambda_max/lambda)^{1/2}.
+ * N_W x N_V calls of blockInnerProductD.
+ */
+template<class FieldW, class Field>
+void BasisBlockAngles(std::vector<FieldW> &W, const std::vector<Eigen::MatrixXcd> &GW,
+                      std::vector<Field> &V, const std::vector<Eigen::MatrixXcd> &GV,
+                      GridBase *bgrid, RealD rtol,
+                      std::vector<RealD> &sin2, std::vector<RealD> &cmin)
+{
+  typedef std::complex<double> cplx;
+  const int nw = W.size(), nv = V.size();
+  const int nloc = bgrid->lSites();
+  GRID_ASSERT( (int)GW.size() == nloc && (int)GV.size() == nloc );
+  std::vector<Eigen::MatrixXcd> Cb(nloc,Eigen::MatrixXcd(nw,nv));
+  LatticeComplexD ip(bgrid);
+  std::vector<ComplexD> loc;
+  Field w(V[0].Grid());
+  for (int i = 0; i < nw; i++) {
+    BasisFieldCopy(W[i],w);
+    for (int j = 0; j < nv; j++) {
+      blockInnerProductD(ip,w,V[j]);                  // <w_i|v_j> on each block
+      BasisBlockLocal(ip,loc);
+      for (int b = 0; b < nloc; b++) Cb[b](i,j) = loc[b];
+    }
+  }
+  // D^{-1/2} M D^{-1/2} = U Lambda U^dag; returns D^{-1/2} U_r Lambda_r^{-1/2}, the r directions above rtol
+  auto Whiten = [&](const Eigen::MatrixXcd &M) -> Eigen::MatrixXcd {
+    Eigen::VectorXcd s = M.diagonal().real().cwiseSqrt().cwiseInverse().cast<cplx>();
+    Eigen::MatrixXcd X = s.asDiagonal() * M * s.asDiagonal();
+    X = 0.5*(X + X.adjoint());
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(X);
+    const Eigen::VectorXd &ev = es.eigenvalues();
+    const int n = ev.size();
+    int r = 0;
+    while (r < n && ev(n-1-r) > rtol*ev(n-1)) r++;
+    Eigen::MatrixXcd U = es.eigenvectors().rightCols(r);
+    Eigen::VectorXcd isq = ev.tail(r).cwiseSqrt().cwiseInverse().cast<cplx>();
+    return s.asDiagonal() * U * isq.asDiagonal();
+  };
+  std::vector<RealD> s2(nloc), cm(nloc);
+  for (int b = 0; b < nloc; b++) {
+    Eigen::MatrixXcd M = Whiten(GW[b]).adjoint() * Cb[b] * Whiten(GV[b]);
+    Eigen::JacobiSVD<Eigen::MatrixXcd> svd(M);
+    const Eigen::VectorXd &c = svd.singularValues();
+    RealD acc = 0.0, mn = 1.0;
+    for (int i = 0; i < c.size(); i++) {
+      RealD ci = std::min(1.0,(RealD)c(i));
+      acc += 1.0 - ci*ci;
+      mn = std::min(mn,ci);
+    }
+    s2[b] = acc / c.size();
+    cm[b] = mn;
+  }
+  BasisBlockGather(bgrid,s2,sin2);
+  BasisBlockGather(bgrid,cm,cmin);
+}
+
+/**
+ * Block-resolved nulliness of the basis vectors: A applied to the whole
+ * vector v_i, measured on each block,
+ *     n_ib = ( ||A v_i||_b^2 / ||v_i||_b^2 )^{1/2},
+ * so that sum_b ||A v_i||_b^2 = ||A v_i||^2.  Per block, over the N vectors,
+ * gathered:
+ *   bmin      = min_i n_ib, the most null basis vector on b
+ *   bmed      = the median over i of n_ib
+ *   bmax      = max_i n_ib, the roughest basis vector on b
+ *   count[t]  = #{i : n_ib < taus[t]}, the basis vectors that are near-null on
+ *               b at that scale
+ * logspec[k]: mean over all blocks of log n_(k)b, the k-th smallest on each
+ * block; exp(logspec) is the typical sorted local spectrum.  N applications
+ * of A and 2N calls of blockInnerProductD; host storage N reals per local block.
+ */
+template<class Field>
+void BasisBlockNulliness(std::vector<Field> &V, LinearOperatorBase<Field> &A, GridBase *bgrid,
+                         const std::vector<RealD> &taus,
+                         std::vector<RealD> &bmin, std::vector<RealD> &bmed, std::vector<RealD> &bmax,
+                         std::vector<std::vector<RealD> > &count, std::vector<RealD> &logspec)
+{
+  const int n    = V.size();
+  const int nloc = bgrid->lSites();
+  const int nt   = taus.size();
+  std::vector<std::vector<RealD> > nb(nloc,std::vector<RealD>(n));
+  LatticeComplexD av(bgrid), vv(bgrid);
+  std::vector<ComplexD> al, vl;
+  Field Av(V[0].Grid());
+  for (int i = 0; i < n; i++) {
+    A.Op(V[i],Av);
+    blockInnerProductD(av,Av,Av);
+    blockInnerProductD(vv,V[i],V[i]);
+    BasisBlockLocal(av,al);
+    BasisBlockLocal(vv,vl);
+    for (int b = 0; b < nloc; b++) nb[b][i] = std::sqrt(real(al[b]) / real(vl[b]));
+  }
+  std::vector<RealD> lo(nloc), md(nloc), hi(nloc);
+  std::vector<std::vector<RealD> > c(nt,std::vector<RealD>(nloc));
+  logspec.assign(n,0.0);
+  for (int b = 0; b < nloc; b++) {
+    std::vector<RealD> &x = nb[b];
+    std::sort(x.begin(),x.end());
+    lo[b] = x[0];
+    md[b] = x[n/2];
+    hi[b] = x[n-1];
+    for (int k = 0; k < n; k++) logspec[k] += std::log(std::max(x[k],1.0e-300));
+    for (int t = 0; t < nt; t++) {
+      int m = 0;
+      for (int k = 0; k < n; k++) m += (x[k] < taus[t]);
+      c[t][b] = m;
+    }
+  }
+  bgrid->GlobalSumVector(logspec.data(),n);
+  for (auto &x : logspec) x /= bgrid->gSites();
+  BasisBlockGather(bgrid,lo,bmin);
+  BasisBlockGather(bgrid,md,bmed);
+  BasisBlockGather(bgrid,hi,bmax);
+  count.resize(nt);
+  for (int t = 0; t < nt; t++) BasisBlockGather(bgrid,c[t],count[t]);
+}
+
+/**
+ * Compatible relaxation: the smoother S run on the error equation A e = 0 with
+ * the coarse space projected out after every sweep,
+ *     e_{k+1} = (1 - P P^dag) (e_k - S(A e_k)),
+ * from nvec Gaussian vectors with e_0 = (1 - P P^dag) eta.  The coarse
+ * correction removes range(P) exactly, so the decay of e_k is what the
+ * smoother alone does to the complement of the coarse space: slow decay means
+ * slow modes that the coarse space does not hold.  Per sweep k = 1..nsweep,
+ * averaged over the vectors (geometric mean):
+ *   err[k-1] = ||e_k|| / ||e_{k-1}||
+ *   res[k-1] = ||A e_k|| / ||A e_{k-1}||
+ * S is the solver's own fine smoother; for a Krylov smoother this is an
+ * operational rate, S not being a fixed linear map.  nsweep x (one smoother
+ * call + 2 applications of A) per vector.
+ */
+template<class Field, class CoarseVector, class Projector>
+void BasisCompatibleRelaxation(Projector &Proj, LinearOperatorBase<Field> &A, LinearFunction<Field> &S,
+                               GridBase *fgrid, GridBase *cgrid, GridParallelRNG &RNG,
+                               int nvec, int nsweep, std::vector<RealD> &err, std::vector<RealD> &res)
+{
+  err.assign(nsweep,0.0);
+  res.assign(nsweep,0.0);
+  std::vector<Field> e(1,fgrid), pe(1,fgrid);
+  std::vector<CoarseVector> c(1,cgrid);
+  Field Ae(fgrid), z(fgrid);
+  auto Complement = [&]() {           // e <- (1 - P P^dag) e
+    Proj.blockProject(e,c);
+    Proj.blockPromote(pe,c);
+    e[0] = e[0] - pe[0];
+  };
+  for (int v = 0; v < nvec; v++) {
+    gaussian(RNG,e[0]);
+    Complement();
+    e[0] = e[0]*std::pow(norm2(e[0]),-0.5);
+    A.Op(e[0],Ae);
+    RealD ne = 1.0, na = std::sqrt(norm2(Ae));
+    for (int k = 0; k < nsweep; k++) {
+      z = Zero();
+      S(Ae,z);
+      e[0] = e[0] - z;
+      Complement();
+      A.Op(e[0],Ae);
+      RealD ne1 = std::sqrt(norm2(e[0])), na1 = std::sqrt(norm2(Ae));
+      err[k] += std::log(ne1/ne) / nvec;
+      res[k] += std::log(na1/na) / nvec;
+      ne = ne1; na = na1;
+    }
+  }
+  for (auto &x : err) x = std::exp(x);
+  for (auto &x : res) x = std::exp(x);
+  Proj.ReleaseScratch();
 }
 
 NAMESPACE_END(Grid);

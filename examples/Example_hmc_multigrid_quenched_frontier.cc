@@ -54,6 +54,10 @@ Author: Patrick Oare
 //                    vector once per update, before the first pass, from its
 //                    own RNG so the MD sources are unchanged.  Large kicks
 //                    tend to a fresh setup of RefreshPasses rounds.
+//                    RefreshKickShape global: the noise is uniform over sites;
+//                    site: it is shaped to |v(x)| site by site, so the kick is
+//                    about RefreshKick relative to v everywhere, walls included.
+//                    Each solve logs QHMC-SPROFILE, the basis norm per s slice.
 //   Mode perturbative  the first-order update v -> v - w, (Q A Q) w = Q dA v,
 //                    with dA = A(U) - A(U at the last update) and Q the
 //                    projector off the basis: mrhs GCR in batches of CorrNrhs,
@@ -154,6 +158,7 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         RefreshPasses,   // Mode refresh: inverse-iteration passes per update
                                   int,         RefreshOrthonormalise, // Mode refresh: 1 orthonormalises after each pass
                                   RealD,       RefreshKick,     // Mode refresh: noise once per update, before the first pass, relative to |v|; 0: none
+                                  std::string, RefreshKickShape, // Mode refresh: global (uniform noise) or site (noise shaped to |v(x)|)
                                   int,         NoiseBasis,      // 1: replace the basis by Gaussian noise before coarsening (k = 0)
                                   RealD,       CorrTol,         // Mode perturbative: batch GCR tolerance
                                   int,         CorrMaxRestarts, // Mode perturbative: restarts of the Outer cycle per batch
@@ -165,17 +170,20 @@ struct QuenchedHMCDriverParams : Serializable {
                                   int,         DiagEvery,       // >0: QHMC-DIAG basis diagnostics after setup and at solves with step%DiagEvery==0
                                   int,         DiagTest,        // DiagEvery: test vectors from fresh noise, made as the setup's; 0: none
                                   int,         DiagTestRegen,   // DiagEvery: 1 makes new test vectors at every diagnostic (moving field); 0 once, after setup
-                                  int,         DiagReference,   // DiagEvery: 1 keeps an fp32 copy of the starting basis for angles and ref_loc
+                                  int,         DiagReference,   // DiagEvery: fp32 reference basis for angles, pair_cos and ref_loc: 1 the starting basis; 2 (Mode refresh) the basis before each update; 0 none
                                   std::vector<int>, DiagTestRounds, // DiagTest: depths of the test vectors (rounds of inverse iteration), ascending
                                   int,         DiagBlockGram,   // DiagEvery: 1 adds the block Gram spectrum of the raw basis (QHMC-DIAG-GRAM)
+                                  int,         DiagBlockNul,    // DiagEvery: 1 adds the block-resolved nulliness of the basis vectors (QHMC-DIAG-BNUL)
+                                  int,         DiagCR,          // DiagEvery: sweeps of compatible relaxation with the fine smoother before each solve (QHMC-CR); 0: none
+                                  int,         DiagCRVectors,   // DiagCR: noise vectors
                                   PVdagMMultiGridParams, MultiGrid);
   QuenchedHMCDriverParams()
     : Ls(24), Mass(0.00078), M5(1.8), MobiusB(1.5), MobiusC(0.5),
       Config(""), SaveSubspace(""), Nrhs(12), SolveSingleRHS(1),
       Beta(2.13), RunMultiGrid(1), TrajL({1.0}), MDsteps({20}), Ntraj(1), Chain(0),
-      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), NoiseBasis(0),
+      Mode("none"), SolveEvery(5), RefreshTol(0.1), RefreshMaxOuter(1), RefreshPasses(1), RefreshOrthonormalise(0), RefreshKick(0.0), RefreshKickShape("global"), NoiseBasis(0),
       CorrTol(1.0e-2), CorrMaxRestarts(4), CorrNrhs(12), CorrOperator("new"), CorrRecoarsen(0), CorrPrecon("mg"), CorrKrylovNstep(10),
-      DiagEvery(0), DiagTest(10), DiagTestRegen(0), DiagReference(1), DiagTestRounds({3}), DiagBlockGram(0) {};
+      DiagEvery(0), DiagTest(10), DiagTestRegen(0), DiagReference(1), DiagTestRounds({3}), DiagBlockGram(0), DiagBlockNul(0), DiagCR(0), DiagCRVectors(2) {};
 };
 
 int main (int argc, char ** argv)
@@ -211,6 +219,11 @@ int main (int argc, char ** argv)
     GRID_ASSERT( !P.CorrRecoarsen || P.CorrOperator=="new" );
     GRID_ASSERT( !P.DiagEvery || (P.RunMultiGrid && P.MultiGrid.Setup.RetainSubspace) );
     GRID_ASSERT( !P.DiagBlockGram || P.DiagEvery );
+    if ( P.RefreshKickShape.empty() ) P.RefreshKickShape = "global";   // a parameter file from before RefreshKickShape
+    GRID_ASSERT( P.RefreshKickShape=="global" || P.RefreshKickShape=="site" );
+    GRID_ASSERT( P.DiagReference>=0 && P.DiagReference<=2 );
+    GRID_ASSERT( (!P.DiagBlockNul && !P.DiagCR) || P.DiagEvery );
+    GRID_ASSERT( P.DiagReference!=2 || P.Mode=="refresh" );
     GRID_ASSERT( P.DiagTestRounds.size()>0 && P.DiagTestRounds[0]>=1 );
     for(int d=1;d<P.DiagTestRounds.size();d++) GRID_ASSERT( P.DiagTestRounds[d]>P.DiagTestRounds[d-1] );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
@@ -343,7 +356,24 @@ int main (int argc, char ** argv)
   //                 gain from this update.  DiagTestRegen 1 makes the vectors at
   //                 the field of each diagnostic, before the update
   //   QHMC-DIAG-GRAM  section 3.2 (DiagBlockGram 1): per-block spectrum of the
-  //                 column-normalised Gram of the raw basis, as quantiles over blocks
+  //                 column-normalised Gram of the raw basis, as quantiles over blocks,
+  //                 with gmean = (det C_b)^{1/N} and the numerical ranks at 1e-2,
+  //                 1e-3, 1e-4; QHMC-DIAG-GRAM-SPEC the typical sorted spectrum,
+  //                 exp of the mean over blocks of log lambda_k
+  // With DiagReference 2 (rolling: the reference is the basis before this update):
+  //   QHMC-OVERLAP    during the update, |<v_old|v>|/(|v_old| |v|) per vector after
+  //                 the kick and after each pass
+  //   pair_cos        the same after the update, on the QHMC-DIAG line
+  //   QHMC-DIAG-ANGLES section 3.3 (with DiagBlockGram 1 at the previous step too):
+  //                 principal angles between the old and new block spans, per block
+  //   QHMC-DIAG-BNUL  (DiagBlockNul 1): ||A v_i||_b/||v_i||_b, the nulliness of each
+  //                 basis vector measured on each block (A on the whole vector): per
+  //                 block the min, median and max over the vectors, as quantiles over
+  //                 blocks, the counts of vectors below 0.02, 0.05, 0.1, and the
+  //                 typical sorted local spectrum
+  //   QHMC-CR         (DiagCR > 0): compatible relaxation, the solver's fine smoother
+  //                 on A e = 0 with (1 - P P^dag) after each sweep, from DiagCRVectors
+  //                 noise vectors: ||e_k||/||e_{k-1}|| and ||A e_k||/||A e_{k-1}|| per sweep
   // Uses PVdagM, not the counted operator, so update_matvecs is unchanged.
   // Device memory: the reference is NBASIS fp32 fields (half the basis), the
   // test vectors DiagTest x (number of depths) fp32 fields and DiagTest fp64
@@ -351,10 +381,15 @@ int main (int argc, char ** argv)
   // fields more while they run.
   //////////////////////////////////////////////////////////////////////
   GridParallelRNG RNGtest(FGrid); RNGtest.SeedFixedIntegers({17,18,19,20});  // diagnostic test vectors only
+  GridParallelRNG RNGcr(FGrid);   RNGcr.SeedFixedIntegers({21,22,23,24});    // compatible relaxation only
   std::vector<LatticeFermionF> DiagRef;
   std::vector<LatticeFermionF> DiagT;      // DiagTest vectors per depth, depth-major
   bool DiagTFresh = false;                 // made at this field, before an update, not yet measured after it
   Eigen::MatrixXcd DiagGW;
+  std::vector<Eigen::MatrixXcd> DiagGramKeep;   // per-block Grams of the basis at the last QHMC-DIAG-GRAM
+  std::vector<Eigen::MatrixXcd> DiagGramRef;    // the same for the rolling reference, when they match it
+  int DiagBasisVersion = 0;                     // counts the updates of the basis
+  int DiagGramVersion  = -1;                    // DiagBasisVersion when DiagGramKeep was taken
   const int DiagChunk = 10;
   GridCartesian *BlockGrid = P.DiagEvery ? BasisBlockGrid(FGrid,CGrids.Coarse5d) : nullptr;
   auto DiagStep = [&](int step) -> bool { return P.DiagEvery && step%P.DiagEvery==0; };
@@ -431,6 +466,11 @@ int main (int argc, char ** argv)
       line << " sin2_mean " << sin2 << " cos_min " << cosv.back() << " n_cos99 " << n99 << " n_cos90 " << n90
            << BasisStat("ref_loc",loc) << BasisStat("ref_glob",glob);
       lists << " cos " << BasisList(cosv) << " ref_loc " << BasisList(loc);
+      if ( P.DiagReference==2 ) {
+        std::vector<RealD> pc = BasisPairCosines(DiagRef,V);
+        line << BasisStat("pair_cos",pc);
+        lists << " pair_cos " << BasisList(pc);
+      }
     }
     if ( P.DiagTest>0 ) {
       if ( DiagT.empty() || (P.DiagTestRegen && !DiagTFresh) ) MakeTest();
@@ -439,14 +479,18 @@ int main (int argc, char ** argv)
     }
     if ( P.DiagBlockGram ) {
       RealD t_gram = -usecond();
-      std::vector<RealD> lmin, kappa, deff, pres;
+      std::vector<RealD> lmin, kappa, deff, pres, gmean, logspec;
+      const std::vector<RealD> taus({1.0e-2,1.0e-3,1.0e-4});
+      std::vector<std::vector<RealD> > rank;
       RealD glmin, glmax;
-      BasisBlockGram(V,BlockGrid,lmin,kappa,deff,pres,glmin,glmax);
+      BasisBlockGram(V,BlockGrid,lmin,kappa,deff,pres,gmean,taus,rank,logspec,glmin,glmax,&DiagGramKeep);
+      DiagGramVersion = DiagBasisVersion;
       t_gram = (t_gram+usecond())/1.0e6;
       std::vector<RealD> ql = BasisQuantiles(lmin, {0.0,0.1,0.5});
       std::vector<RealD> qk = BasisQuantiles(kappa,{0.5,0.9,1.0});
       std::vector<RealD> qe = BasisQuantiles(deff, {0.0,0.1,0.5,1.0});
       std::vector<RealD> qp = BasisQuantiles(pres, {0.0,0.1,0.5});
+      std::vector<RealD> qg = BasisQuantiles(gmean,{0.0,0.1,0.5});
       std::ostringstream gram;
       gram.precision(6);
       gram << "QHMC-DIAG-GRAM traj " << traj << " step " << step << " N " << V.size() << " nblocks " << lmin.size()
@@ -454,11 +498,67 @@ int main (int argc, char ** argv)
            << " kappa_p50 " << qk[0] << " kappa_p90 " << qk[1] << " kappa_max " << qk[2]
            << " deff_p0 " << qe[0] << " deff_p10 " << qe[1] << " deff_p50 " << qe[2] << " deff_max " << qe[3]
            << " pres_p0 " << qp[0] << " pres_p10 " << qp[1] << " pres_p50 " << qp[2]
-           << " glob_lmin " << glmin << " glob_lmax " << glmax << " seconds " << t_gram;
+           << " gmean_p0 " << qg[0] << " gmean_p10 " << qg[1] << " gmean_p50 " << qg[2];
+      const char *tname[3] = {"rank2","rank3","rank4"};
+      for(int t=0;t<3;t++){
+        std::vector<RealD> qr = BasisQuantiles(rank[t],{0.0,0.1,0.5});
+        gram << " " << tname[t] << "_p0 " << qr[0] << " " << tname[t] << "_p10 " << qr[1] << " " << tname[t] << "_p50 " << qr[2];
+      }
+      gram << " glob_lmin " << glmin << " glob_lmax " << glmax << " seconds " << t_gram;
       std::cout << GridLogMessage << gram.str() << std::endl;
+      std::vector<RealD> spec;
+      for(auto x : logspec) spec.push_back(std::exp(x));
+      std::cout << GridLogMessage << "QHMC-DIAG-GRAM-SPEC traj " << traj << " step " << step
+                << " lambda " << BasisList(spec) << std::endl;
+      if ( P.DiagReference==2 && DiagGramRef.size() ) {
+        RealD t_ang = -usecond();
+        std::vector<RealD> sin2, cmin;
+        BasisBlockAngles(DiagRef,DiagGramRef,V,DiagGramKeep,BlockGrid,1.0e-10,sin2,cmin);
+        t_ang = (t_ang+usecond())/1.0e6;
+        std::vector<RealD> qs = BasisQuantiles(sin2,{0.1,0.5,0.9,1.0});
+        std::vector<RealD> qc = BasisQuantiles(cmin,{0.0,0.1,0.5});
+        std::cout << GridLogMessage << "QHMC-DIAG-ANGLES traj " << traj << " step " << step
+                  << " sin2_p10 " << qs[0] << " sin2_p50 " << qs[1] << " sin2_p90 " << qs[2] << " sin2_max " << qs[3]
+                  << " cmin_p0 " << qc[0] << " cmin_p10 " << qc[1] << " cmin_p50 " << qc[2]
+                  << " seconds " << t_ang << std::endl;
+        std::cout << GridLogMessage << "QHMC-DIAG-ANGLES-LIST traj " << traj << " step " << step
+                  << " sin2_worst " << BasisBlockWorst(BlockGrid,sin2,10,true) << std::endl;
+        DiagGramRef.clear();
+      }
       std::cout << GridLogMessage << "QHMC-DIAG-GRAM-LIST traj " << traj << " step " << step
                 << " lmin_worst " << BasisBlockWorst(BlockGrid,lmin,10,false)
                 << " pres_worst " << BasisBlockWorst(BlockGrid,pres,10,false) << std::endl;
+    }
+    if ( P.DiagBlockNul ) {
+      RealD t_bn = -usecond();
+      const std::vector<RealD> taus({0.02,0.05,0.1});
+      std::vector<RealD> bmin, bmed, bmax, logspec;
+      std::vector<std::vector<RealD> > count;
+      BasisBlockNulliness(V,PVdagM,BlockGrid,taus,bmin,bmed,bmax,count,logspec);
+      t_bn = (t_bn+usecond())/1.0e6;
+      std::vector<RealD> q1 = BasisQuantiles(bmin,{0.0,0.1,0.5,0.9});
+      std::vector<RealD> qm = BasisQuantiles(bmed,{0.1,0.5,0.9});
+      std::vector<RealD> qx = BasisQuantiles(bmax,{0.5,0.9,1.0});
+      std::ostringstream bn;
+      bn.precision(6);
+      bn << "QHMC-DIAG-BNUL traj " << traj << " step " << step
+         << " bmin_p0 " << q1[0] << " bmin_p10 " << q1[1] << " bmin_p50 " << q1[2] << " bmin_p90 " << q1[3]
+         << " bmed_p10 " << qm[0] << " bmed_p50 " << qm[1] << " bmed_p90 " << qm[2]
+         << " bmax_p50 " << qx[0] << " bmax_p90 " << qx[1] << " bmax_max " << qx[2];
+      const char *cname[3] = {"n002","n005","n01"};
+      for(int t=0;t<3;t++){
+        std::vector<RealD> qc = BasisQuantiles(count[t],{0.1,0.5,0.9});
+        bn << " " << cname[t] << "_p10 " << qc[0] << " " << cname[t] << "_p50 " << qc[1] << " " << cname[t] << "_p90 " << qc[2];
+      }
+      bn << " seconds " << t_bn;
+      std::vector<RealD> spec;
+      for(auto x : logspec) spec.push_back(std::exp(x));
+      std::cout << GridLogMessage << bn.str() << std::endl;
+      std::cout << GridLogMessage << "QHMC-DIAG-BNUL-SPEC traj " << traj << " step " << step
+                << " nul " << BasisList(spec) << std::endl;
+      std::cout << GridLogMessage << "QHMC-DIAG-BNUL-LIST traj " << traj << " step " << step
+                << " bmed_worst " << BasisBlockWorst(BlockGrid,bmed,10,true)
+                << " bmax_worst " << BasisBlockWorst(BlockGrid,bmax,10,true) << std::endl;
     }
     t_diag = (t_diag+usecond())/1.0e6;
     std::cout << GridLogMessage << line.str() << " seconds " << t_diag << std::endl;
@@ -485,7 +585,7 @@ int main (int argc, char ** argv)
 
     // The reference for the diagnostics: the basis as loaded or generated,
     // before NoiseBasis replaces it
-    if ( P.DiagEvery && P.DiagReference ) {
+    if ( P.DiagEvery && P.DiagReference==1 ) {
       DiagRef.assign(NBASIS,LatticeFermionF(FGridsF.FGridF));
       for(int b=0;b<NBASIS;b++) precisionChange(DiagRef[b],Coarsening.rawNull[b]);
       DiagGW = BasisCrossGram(Coarsening.rawNull,Coarsening.rawNull);
@@ -664,18 +764,45 @@ int main (int argc, char ** argv)
       uint64_t m0 = counter.Get("update");
       t_update = -usecond();
       if ( P.Mode=="refresh" ) {
+        // DiagReference 2: the basis before this update becomes the reference, with its
+        // block Grams when the last QHMC-DIAG-GRAM was taken on it
+        const bool overlap = DiagStep(step) && P.DiagReference==2;
+        RealD t_overlap = 0.0;   // kept out of update_seconds
+        auto Overlap = [&](const std::string &stage) {
+          t_overlap -= usecond();
+          std::vector<RealD> c = BasisPairCosines(DiagRef,Coarsening.rawNull);
+          std::cout << GridLogMessage << "QHMC-OVERLAP traj " << traj << " step " << step << " stage " << stage
+                    << BasisStat("cos",c) << " list " << BasisList(c) << std::endl;
+          t_overlap += usecond();
+        };
+        if ( overlap ) {
+          t_overlap -= usecond();
+          if ( DiagRef.size()!=NBASIS ) DiagRef.assign(NBASIS,LatticeFermionF(FGridsF.FGridF));
+          for(int b=0;b<NBASIS;b++) precisionChange(DiagRef[b],Coarsening.rawNull[b]);
+          DiagGW = BasisCrossGram(Coarsening.rawNull,Coarsening.rawNull);
+          DiagGramRef.clear();
+          if ( DiagGramVersion==DiagBasisVersion ) DiagGramRef = std::move(DiagGramKeep);
+          t_overlap += usecond();
+        }
         std::vector<int> steps;
         for(int p=0;p<P.RefreshPasses;p++){
-          if ( p==0 && P.RefreshKick>0.0 ) KickBasis(Coarsening.rawNull,RNGkick,P.RefreshKick);
+          if ( p==0 && P.RefreshKick>0.0 ) {
+            if ( P.RefreshKickShape=="site" ) KickBasisSite(Coarsening.rawNull,RNGkick,P.RefreshKick);
+            else                              KickBasis    (Coarsening.rawNull,RNGkick,P.RefreshKick);
+            if ( overlap ) Overlap("kick");
+          }
           steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
           if ( P.RefreshOrthonormalise ) OrthonormaliseBasis(Coarsening.rawNull);
+          if ( overlap ) Overlap("pass"+std::to_string(p+1));
         }
         for(auto s : steps) update_steps += (RealD)s/steps.size();
+        t_update -= t_overlap;
       } else {
         update_steps = PerturbativeBasisUpdate(traj,step);
       }
       t_update = (t_update+usecond())/1.0e6;
       mv_update = counter.Get("update") - m0;
+      DiagBasisVersion++;
     }
     RealD mem_update = FreeDeviceMB();
 
@@ -686,10 +813,44 @@ int main (int argc, char ** argv)
     RealD mem_rebuild = FreeDeviceMB();
     RealD null_resid = InvarianceResidual(Coarsening.rawNull,PVdagM);
     RealD gram_cond  = SpanProjector<LatticeFermionD>(Coarsening.rawNull).GramCondition();
+    {
+      // Fraction of each basis vector's norm^2 on each s slice (dimension 0 of the 5d grid):
+      // the mean over the basis, and vector 0
+      std::vector<RealD> sn, mean(P.Ls,0.0), first;
+      for(int b=0;b<NBASIS;b++){
+        sliceNorm(sn,Coarsening.rawNull[b],0);
+        RealD tot = 0.0;
+        for(auto x : sn) tot += x;
+        for(int s=0;s<P.Ls;s++) sn[s] /= tot;
+        for(int s=0;s<P.Ls;s++) mean[s] += sn[s]/NBASIS;
+        if ( b==0 ) first = sn;
+      }
+      std::stringstream line;
+      line << "QHMC-SPROFILE traj " << traj << " step " << step << " mean ";
+      for(int s=0;s<P.Ls;s++) line << (s ? "," : "") << mean[s];
+      line << " v0 ";
+      for(int s=0;s<P.Ls;s++) line << (s ? "," : "") << first[s];
+      std::cout << GridLogMessage << line.str() << std::endl;
+    }
     Diagnose(traj,step);
 
     RealD t_solve = -usecond();
     PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
+    if ( DiagStep(step) && P.DiagCR>0 ) {
+      // Compatible relaxation with this solve's own fine smoother; kept out of solve_seconds
+      RealD t_cr = -usecond();
+      std::vector<RealD> err, res;
+      BasisCompatibleRelaxation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,PVdagM,Solver.SmootherGCR,
+                                                                            FGrid,CGrids.Coarse5d,RNGcr,P.DiagCRVectors,P.DiagCR,err,res);
+      t_cr = (t_cr+usecond())/1.0e6;
+      t_solve -= t_cr*1.0e6;
+      RealD rerr = 1.0, rres = 1.0;              // geometric mean over the second half of the sweeps
+      int k0 = P.DiagCR/2, nk = P.DiagCR-k0;
+      for(int k=k0;k<P.DiagCR;k++){ rerr *= std::pow(err[k],1.0/nk); rres *= std::pow(res[k],1.0/nk); }
+      std::cout << GridLogMessage << "QHMC-CR traj " << traj << " step " << step << " sweeps " << P.DiagCR
+                << " vectors " << P.DiagCRVectors << " rate_err " << rerr << " rate_res " << rres
+                << " err " << BasisList(err) << " res " << BasisList(res) << " seconds " << t_cr << std::endl;
+    }
     for(int r=0;r<P.Nrhs;r++) mdsol[r]=Zero();
     Solver.Solve(mdsrc,mdsol);
     t_solve = (t_solve+usecond())/1.0e6;

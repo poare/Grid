@@ -91,4 +91,25 @@ void KickBasis(std::vector<Field> &V, GridParallelRNG &RNG, RealD kick)
   }
 }
 
+//////////////////////////////////////////////////////////////////////////////
+// As KickBasis, with the noise shaped to v site by site: eta(x) -> |v(x)| eta(x),
+// |v(x)| the norm of v on 5d site x, before the global rescale to kick |v|.
+// The kick is then about kick relative to v on every site, so it follows v's
+// peaking in s at the walls instead of spreading evenly over Ls.
+//////////////////////////////////////////////////////////////////////////////
+template<class Field>
+void KickBasisSite(std::vector<Field> &V, GridParallelRNG &RNG, RealD kick)
+{
+  typedef Lattice<typename Field::vector_object::tensor_reduced> ComplexField;   // LatticeComplex of Field's precision
+  Field eta(V[0].Grid());
+  ComplexField scale(V[0].Grid());
+  for(auto &v : V){
+    gaussian(RNG,eta);
+    scale = localNorm2(v);           // |v(x)|^2 on each site
+    scale = sqrt(scale);             // |v(x)|: the noise amplitude follows v's
+    eta   = scale*eta;
+    v = v + (kick*std::sqrt(norm2(v)/norm2(eta)))*eta;
+  }
+}
+
 NAMESPACE_END(Grid);
