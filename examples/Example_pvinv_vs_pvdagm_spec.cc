@@ -6,7 +6,7 @@
 
     Usage :
       $ ./Example_pvinv_vs_pvdagm_spec <Nm> <Nk> <maxiter> <Nstop> <inFile> <outDir> <?rf>
-            --grid Lx.Ly.Lz.Lt --mpi ... [--Ls 16] [--mass 0.1]
+            --grid Lx.Ly.Lz.Lt --mpi ... [--Ls 16] [--mass 0.1] [--M5 1.0,1.4,...]
 
       Nm      = Maximum size of approximation subspace.
       Nk      = Size of truncation subspace.
@@ -15,6 +15,9 @@
       inFile  = Gauge configuration to read in (NERSC format).
       outDir  = Directory to write output to.
       rf      = (Optional) RitzFilter, default EvalNormSmall.
+      --M5    = (Optional) comma-separated list of domain-wall heights, run one after another
+                on the same gauge field and source. Without it M5 = 1.8 and the files below go
+                in ${outDir} itself; with it they go in ${outDir}/M5_<M5>/, one per value.
 
     Output:
       ${outDir}/PVdagM_evals.txt = eigenvalues of PV^\dag M, one `$idx $eval $ritz` per line.
@@ -41,6 +44,7 @@
     *************************************************************************************/
     /*  END LEGAL */
 
+#include <filesystem>
 #include <Grid/Grid.h>
 #include <Grid/algorithms/multigrid/PVdagMOperators.h>
 #include <Grid/algorithms/multigrid/MultiGridIO.h>
@@ -123,7 +127,14 @@ int main (int argc, char ** argv)
     std::string arg = GridCmdOptionPayload(argv,argv+argc,"--mass");
     GridCmdOptionFloat(arg,mass);
   }
-  RealD M5       = 1.8;
+  std::vector<RealD> M5s = {1.8};   // override with --M5 1.0,1.4,...
+  bool M5subdirs = GridCmdOptionExists(argv,argv+argc,"--M5");
+  if (M5subdirs) {
+    std::vector<std::string> s;
+    GridCmdOptionCSL(GridCmdOptionPayload(argv,argv+argc,"--M5"),s);
+    M5s.clear();
+    for (auto &x : s) M5s.push_back(std::stod(x));
+  }
   RealD b        = 1.5;    // Mobius scale b+c=2, b-c=1, as in Example_spec_kryschur
   RealD c        = 0.5;
   RealD KStol    = 1e-8;   // Krylov-Schur tolerance
@@ -131,9 +142,6 @@ int main (int argc, char ** argv)
 
   std::cout << GridLogMessage << "Sorting eigenvalues using " << rfToString(RF) << std::endl;
   std::cout << GridLogMessage << "Reading gauge field from: " << file << std::endl;
-  std::cout << GridLogMessage << "Mobius Ls=" << Ls << " M5=" << M5 << " m=" << mass
-            << " b=" << b << " c=" << c << std::endl;
-
   GridCartesian         * UGrid   = SpaceTimeGrid::makeFourDimGrid(GridDefaultLatt(),
                                                                     GridDefaultSimd(Nd,vComplex::Nsimd()),
                                                                     GridDefaultMpi());
@@ -149,52 +157,65 @@ int main (int argc, char ** argv)
   FieldMetaData header;
   NerscIO::readConfiguration(Umu,header,file);
 
-  MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
-  MobiusFermionD Dpv (Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0 ,M5,b,c);
-
-  //////////////////////////////////////////////////////////////////////
-  // Operators: PV^\dag M from PVdagMOperators.h, PV^{-1} M from above
-  //////////////////////////////////////////////////////////////////////
   typedef SchurRedBlackDiagTwoSolve<LatticeFermionD>                    SchurSolver_t;
   typedef PauliVillarsSolverRBprec<LatticeFermionD,SchurSolver_t>       PVinverter_t;
 
-  ConjugateGradient<LatticeFermionD> PVCG(PVtol,10000);
-  SchurSolver_t PVSchur(PVCG);
-  PVinverter_t  PVinv(PVSchur);
+  for (RealD M5 : M5s) {
+    // Output directory for this M5: outDir itself without --M5, outDir/M5_<M5> with it
+    std::string dir = outDir;
+    if (M5subdirs) {
+      std::ostringstream os; os << std::fixed << std::setprecision(2) << M5;
+      dir = outDir + "/M5_" + os.str();
+      if (FGrid->IsBoss()) std::filesystem::create_directories(dir);
+      FGrid->Barrier();
+    }
+    std::cout << GridLogMessage << "=============== Mobius Ls=" << Ls << " M5=" << M5 << " m=" << mass
+              << " b=" << b << " c=" << c << " -> " << dir << " ===============" << std::endl;
 
-  PVdagMLinearOperator<MobiusFermionD,LatticeFermionD>              PVdagM(Ddwf,Dpv);
-  PVinvMLinearOperator<MobiusFermionD,LatticeFermionD,PVinverter_t> PVinvM(Ddwf,Dpv,PVinv);
+    MobiusFermionD Ddwf(Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,mass,M5,b,c);
+    MobiusFermionD Dpv (Umu,*FGrid,*FrbGrid,*UGrid,*UrbGrid,1.0 ,M5,b,c);
 
-  //////////////////////////////////////////////////////////////////////
-  // Krylov-Schur on each, same source
-  //////////////////////////////////////////////////////////////////////
-  std::cout << GridLogMessage << "Krylov-Schur: Nm=" << Nm << " Nk=" << Nk
-            << " maxIter=" << maxIter << " Nstop=" << Nstop << std::endl;
+    //////////////////////////////////////////////////////////////////////
+    // Operators: PV^\dag M from PVdagMOperators.h, PV^{-1} M from above
+    //////////////////////////////////////////////////////////////////////
+    ConjugateGradient<LatticeFermionD> PVCG(PVtol,10000);
+    SchurSolver_t PVSchur(PVCG);
+    PVinverter_t  PVinv(PVSchur);
 
-  std::cout << GridLogMessage << "*************** PV^dag M ***************" << std::endl;
-  KrylovSchur KSdag(PVdagM, FGrid, KStol, RF);
-  RealD t0 = usecond();
-  KSdag(src, maxIter, Nm, Nk, Nstop);
-  RealD t1 = usecond();
-  std::cout << GridLogMessage << "PV^dag M Krylov-Schur time: " << (t1-t0)/1.0e6 << " s" << std::endl;
-  std::cout << GridLogMessage << "PV^dag M eigenvalues: " << std::endl << KSdag.getEvals() << std::endl;
-  if (FGrid->IsBoss()) { writeEvals(KSdag, outDir + "/PVdagM_evals.txt"); }
-  {
-    std::vector<LatticeFermionD> evecs = KSdag.getEvecs();
-    saveSubspace(evecs, outDir + "/PVdagM_evecs");      // collective: every rank
-  }
+    PVdagMLinearOperator<MobiusFermionD,LatticeFermionD>              PVdagM(Ddwf,Dpv);
+    PVinvMLinearOperator<MobiusFermionD,LatticeFermionD,PVinverter_t> PVinvM(Ddwf,Dpv,PVinv);
 
-  std::cout << GridLogMessage << "*************** PV^-1 M ****************" << std::endl;
-  KrylovSchur KSinv(PVinvM, FGrid, KStol, RF);
-  RealD t2 = usecond();
-  KSinv(src, maxIter, Nm, Nk, Nstop);
-  RealD t3 = usecond();
-  std::cout << GridLogMessage << "PV^-1 M Krylov-Schur time: " << (t3-t2)/1.0e6 << " s" << std::endl;
-  std::cout << GridLogMessage << "PV^-1 M eigenvalues: " << std::endl << KSinv.getEvals() << std::endl;
-  if (FGrid->IsBoss()) { writeEvals(KSinv, outDir + "/PVinvM_evals.txt"); }
-  {
-    std::vector<LatticeFermionD> evecs = KSinv.getEvecs();
-    saveSubspace(evecs, outDir + "/PVinvM_evecs");      // collective: every rank
+    //////////////////////////////////////////////////////////////////////
+    // Krylov-Schur on each, same source
+    //////////////////////////////////////////////////////////////////////
+    std::cout << GridLogMessage << "Krylov-Schur: Nm=" << Nm << " Nk=" << Nk
+              << " maxIter=" << maxIter << " Nstop=" << Nstop << std::endl;
+
+    std::cout << GridLogMessage << "*************** PV^dag M ***************" << std::endl;
+    KrylovSchur KSdag(PVdagM, FGrid, KStol, RF);
+    RealD t0 = usecond();
+    KSdag(src, maxIter, Nm, Nk, Nstop);
+    RealD t1 = usecond();
+    std::cout << GridLogMessage << "PV^dag M Krylov-Schur time: " << (t1-t0)/1.0e6 << " s" << std::endl;
+    std::cout << GridLogMessage << "PV^dag M eigenvalues: " << std::endl << KSdag.getEvals() << std::endl;
+    if (FGrid->IsBoss()) { writeEvals(KSdag, dir + "/PVdagM_evals.txt"); }
+    {
+      std::vector<LatticeFermionD> evecs = KSdag.getEvecs();
+      saveSubspace(evecs, dir + "/PVdagM_evecs");      // collective: every rank
+    }
+
+    std::cout << GridLogMessage << "*************** PV^-1 M ****************" << std::endl;
+    KrylovSchur KSinv(PVinvM, FGrid, KStol, RF);
+    RealD t2 = usecond();
+    KSinv(src, maxIter, Nm, Nk, Nstop);
+    RealD t3 = usecond();
+    std::cout << GridLogMessage << "PV^-1 M Krylov-Schur time: " << (t3-t2)/1.0e6 << " s" << std::endl;
+    std::cout << GridLogMessage << "PV^-1 M eigenvalues: " << std::endl << KSinv.getEvals() << std::endl;
+    if (FGrid->IsBoss()) { writeEvals(KSinv, dir + "/PVinvM_evals.txt"); }
+    {
+      std::vector<LatticeFermionD> evecs = KSinv.getEvecs();
+      saveSubspace(evecs, dir + "/PVinvM_evecs");      // collective: every rank
+    }
   }
 
   std::cout << GridLogMessage << "Done" << std::endl;
