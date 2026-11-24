@@ -482,8 +482,10 @@ int main (int argc, char ** argv)
       std::vector<RealD> lmin, kappa, deff, pres, gmean, logspec;
       const std::vector<RealD> taus({1.0e-2,1.0e-3,1.0e-4});
       std::vector<std::vector<RealD> > rank;
-      RealD glmin, glmax;
-      BasisBlockGram(V,BlockGrid,lmin,kappa,deff,pres,gmean,taus,rank,logspec,glmin,glmax,&DiagGramKeep);
+      std::vector<RealD> glspec;
+      BasisBlockGram(V,BlockGrid,lmin,kappa,deff,pres,gmean,taus,rank,logspec,glspec,&DiagGramKeep);
+      RealD glogdet = 0.0;                                   // log det C of the unblocked basis
+      for(auto x : glspec) glogdet += std::log(std::max(x,1.0e-16));
       DiagGramVersion = DiagBasisVersion;
       t_gram = (t_gram+usecond())/1.0e6;
       std::vector<RealD> ql = BasisQuantiles(lmin, {0.0,0.1,0.5});
@@ -504,12 +506,21 @@ int main (int argc, char ** argv)
         std::vector<RealD> qr = BasisQuantiles(rank[t],{0.0,0.1,0.5});
         gram << " " << tname[t] << "_p0 " << qr[0] << " " << tname[t] << "_p10 " << qr[1] << " " << tname[t] << "_p50 " << qr[2];
       }
-      gram << " glob_lmin " << glmin << " glob_lmax " << glmax << " seconds " << t_gram;
+      gram << " glob_lmin " << glspec.front() << " glob_lmax " << glspec.back()
+           << " glob_logdet " << glogdet << " glob_gmean " << std::exp(glogdet/glspec.size());
+      for(int t=0;t<3;t++){
+        int c = 0;
+        for(auto x : glspec) c += (x > taus[t]);
+        gram << " glob_" << tname[t] << " " << c;
+      }
+      gram << " seconds " << t_gram;
       std::cout << GridLogMessage << gram.str() << std::endl;
       std::vector<RealD> spec;
       for(auto x : logspec) spec.push_back(std::exp(x));
       std::cout << GridLogMessage << "QHMC-DIAG-GRAM-SPEC traj " << traj << " step " << step
                 << " lambda " << BasisList(spec) << std::endl;
+      std::cout << GridLogMessage << "QHMC-DIAG-GRAM-GSPEC traj " << traj << " step " << step
+                << " lambda " << BasisList(glspec) << std::endl;
       if ( P.DiagReference==2 && DiagGramRef.size() ) {
         RealD t_ang = -usecond();
         std::vector<RealD> sin2, cmin;

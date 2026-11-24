@@ -339,8 +339,8 @@ void BasisDefect(Projector &Proj, LinearOperatorBase<Field> &A, SpanProjector<Fi
  * logspec[k]: mean over all blocks of log lambda_k(C_b), eigenvalues ascending;
  * exp(logspec) is the typical sorted spectrum, and sum_k logspec[k] the mean
  * log det C_b.  Eigenvalues below 1e-16 count as 1e-16 in the logs.
- * glmin, glmax: the extreme eigenvalues of the column-normalised global Gram
- * G = sum_b G_b.  N(N+1)/2 calls of blockInnerProductD; host storage N^2
+ * glspec: the eigenvalues, ascending, of the column-normalised global Gram
+ * C = D^{-1/2} G D^{-1/2}, G = sum_b G_b (the unblocked basis).  N(N+1)/2 calls of blockInnerProductD; host storage N^2
  * complex numbers per local block.  V must be raw, never block-orthonormalised.
  * keep, if given, receives the per-block G_b (local blocks, local lexicographic
  * order) for BasisBlockAngles.
@@ -351,7 +351,7 @@ void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
                     std::vector<RealD> &deff, std::vector<RealD> &pres,
                     std::vector<RealD> &gmean, const std::vector<RealD> &taus,
                     std::vector<std::vector<RealD> > &rank, std::vector<RealD> &logspec,
-                    RealD &glmin, RealD &glmax, std::vector<Eigen::MatrixXcd> *keep = nullptr)
+                    std::vector<RealD> &glspec, std::vector<Eigen::MatrixXcd> *keep = nullptr)
 {
   typedef std::complex<double> cplx;
   const int n    = V.size();
@@ -383,8 +383,7 @@ void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
     return es.eigenvalues();
   };
   Eigen::VectorXd gl = NormalisedEigenvalues(G);
-  glmin = gl(0);
-  glmax = gl(n-1);
+  glspec.assign(gl.data(),gl.data()+n);
 
   const int nt = taus.size();
   std::vector<RealD> l(nloc), k(nloc), e(nloc), p(nloc), gm(nloc);
