@@ -47,6 +47,21 @@ void BasisFieldCopy(const Field &in, Field &out) { out = in; }
 template<class FieldIn, class Field>
 void BasisFieldCopy(const FieldIn &in, Field &out) { precisionChange(out,in); }
 
+/** ||A v|| / ||v|| for one vector; Av is left holding A v. */
+template<class Field>
+RealD BasisVectorNulliness(const Field &v, LinearOperatorBase<Field> &A, Field &Av)
+{
+  A.Op(v,Av);
+  return std::sqrt(norm2(Av) / norm2(v));
+}
+
+/** |<w|v>| / (|w| |v|) */
+template<class Field>
+RealD BasisCosine(const Field &w, const Field &v)
+{
+  return abs(innerProduct(w,v)) / std::sqrt(norm2(w)*norm2(v));   // ComplexD is thrust::complex on GPU builds
+}
+
 /**
  * Nulliness of each basis vector: nul_b = ||A v_b|| / ||v_b|| and
  * rq_b = |<v_b|A v_b>| / ||v_b||^2.
@@ -59,10 +74,8 @@ void BasisNulliness(std::vector<Field> &V, LinearOperatorBase<Field> &A,
   nul.resize(V.size());
   rq.resize(V.size());
   for (size_t b = 0; b < V.size(); b++) {
-    A.Op(V[b],Av);
-    RealD n2 = norm2(V[b]);
-    nul[b] = std::sqrt(norm2(Av) / n2);
-    rq[b]  = abs(innerProduct(V[b],Av)) / n2;   // ComplexD is thrust::complex on GPU builds
+    nul[b] = BasisVectorNulliness(V[b],A,Av);
+    rq[b]  = abs(innerProduct(V[b],Av)) / norm2(V[b]);   // ComplexD is thrust::complex on GPU builds
   }
 }
 
@@ -343,26 +356,38 @@ void BasisDefect(Projector &Proj, LinearOperatorBase<Field> &A, SpanProjector<Fi
  * C = D^{-1/2} G D^{-1/2}, G = sum_b G_b (the unblocked basis).  N(N+1)/2 calls of blockInnerProductD; host storage N^2
  * complex numbers per local block.  V must be raw, never block-orthonormalised.
  * keep, if given, receives the per-block G_b (local blocks, local lexicographic
- * order) for BasisBlockAngles.
+ * order) for BasisBlockAngles; gram, if given, the global Gram G.
+ * V may be stored at lower precision (FieldW): each pair is then converted
+ * into two temporaries of the working type Field on fgrid, whose layout the
+ * block grid matches.
  */
-template<class Field>
-void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
+template<class Field, class FieldW>
+void BasisBlockGram(std::vector<FieldW> &V, GridBase *fgrid, GridBase *bgrid,
                     std::vector<RealD> &lmin, std::vector<RealD> &kappa,
                     std::vector<RealD> &deff, std::vector<RealD> &pres,
                     std::vector<RealD> &gmean, const std::vector<RealD> &taus,
                     std::vector<std::vector<RealD> > &rank, std::vector<RealD> &logspec,
-                    std::vector<RealD> &glspec, std::vector<Eigen::MatrixXcd> *keep = nullptr)
+                    std::vector<RealD> &glspec, std::vector<Eigen::MatrixXcd> *keep = nullptr,
+                    Eigen::MatrixXcd *gram = nullptr)
 {
   typedef std::complex<double> cplx;
+  constexpr bool same = std::is_same<Field,FieldW>::value;
   const int n    = V.size();
   const int nloc = bgrid->lSites();
   const RealD nb = bgrid->gSites();
   std::vector<Eigen::MatrixXcd> Gb(nloc,Eigen::MatrixXcd(n,n));
   LatticeComplexD ip(bgrid);
   std::vector<ComplexD> loc;
+  std::vector<Field> tmp;                            // the converted pair, only for FieldW != Field
+  if ( !same ) tmp.assign(2,Field(fgrid));
+  auto Load = [&](int k, int slot) -> const Field & {
+    if constexpr (same) return V[k];
+    else { BasisFieldCopy(V[k],tmp[slot]); return tmp[slot]; }
+  };
   for (int i = 0; i < n; i++) {
+    const Field &vi = Load(i,0);
     for (int j = i; j < n; j++) {
-      blockInnerProductD(ip,V[i],V[j]);              // <v_i|v_j> on each block
+      blockInnerProductD(ip,vi,Load(j,1));           // <v_i|v_j> on each block
       BasisBlockLocal(ip,loc);
       for (int b = 0; b < nloc; b++) {
         Gb[b](i,j) = loc[b];
@@ -420,6 +445,20 @@ void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
   rank.resize(nt);
   for (int t = 0; t < nt; t++) BasisBlockGather(bgrid,r[t],rank[t]);
   if ( keep ) *keep = std::move(Gb);
+  if ( gram ) *gram = G;
+}
+
+/** BasisBlockGram for a basis stored at its working precision. */
+template<class Field>
+void BasisBlockGram(std::vector<Field> &V, GridBase *bgrid,
+                    std::vector<RealD> &lmin, std::vector<RealD> &kappa,
+                    std::vector<RealD> &deff, std::vector<RealD> &pres,
+                    std::vector<RealD> &gmean, const std::vector<RealD> &taus,
+                    std::vector<std::vector<RealD> > &rank, std::vector<RealD> &logspec,
+                    std::vector<RealD> &glspec, std::vector<Eigen::MatrixXcd> *keep = nullptr,
+                    Eigen::MatrixXcd *gram = nullptr)
+{
+  BasisBlockGram<Field,Field>(V,V[0].Grid(),bgrid,lmin,kappa,deff,pres,gmean,taus,rank,logspec,glspec,keep,gram);
 }
 
 /**
@@ -433,7 +472,7 @@ std::vector<RealD> BasisPairCosines(std::vector<FieldW> &W, std::vector<Field> &
   std::vector<RealD> c(V.size());
   for (size_t i = 0; i < V.size(); i++) {
     BasisFieldCopy(W[i],w);
-    c[i] = abs(innerProduct(w,V[i])) / std::sqrt(norm2(w)*norm2(V[i]));
+    c[i] = BasisCosine(w,V[i]);
   }
   return c;
 }

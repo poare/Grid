@@ -191,6 +191,18 @@ int main (int argc, char ** argv)
   Grid_init(&argc,&argv);
 
   QuenchedHMCDriverParams P;
+  // Read only when present, outside QuenchedHMCDriverParams: Grid's reader aborts
+  // on an absent int tag, and a job submitted before these existed writes a
+  // parameter file without them.  Absent, each takes the value below.
+  //   TwinUpdate        Mode refresh, DiagReference 2: at each diagnostic step every
+  //                     basis vector is also refreshed without the kick, its twin F(v),
+  //                     next to the run's F(v + eps eta) (QHMC-TWIN, QHMC-DIAG-TWIN-*)
+  //   TwinBaseline      TwinUpdate: that many evenly spaced vectors also refresh their
+  //                     noise alone, F(eta); 0: none
+  //   TwinBaselineEvery TwinBaseline: at steps with step%TwinBaselineEvery==0
+  //   SolveMGEvery      the MG solve at steps with step%SolveMGEvery==0 only; the update,
+  //                     rebuild and diagnostics still run at every SolveEvery step
+  int TwinUpdate = 0, TwinBaseline = 0, TwinBaselineEvery = 1, SolveMGEvery = 1;
   {
     std::string pfile("");
     if( GridCmdOptionExists(argv,argv+argc,"--hmc-params") )
@@ -208,6 +220,12 @@ int main (int argc, char ** argv)
       }
       XmlReader RD(pfile);
       read(RD, "QuenchedHMCDriver", P);
+      if ( RD.push("QuenchedHMCDriver") ) {
+        std::vector<std::pair<std::string,int *> > optional({{"TwinUpdate",&TwinUpdate},{"TwinBaseline",&TwinBaseline},
+                                                             {"TwinBaselineEvery",&TwinBaselineEvery},{"SolveMGEvery",&SolveMGEvery}});
+        for(auto &o : optional) if ( RD.push(o.first) ) { RD.pop(); read(RD,o.first,*o.second); }
+        RD.pop();
+      }
     }
     CheckValidity(P.MultiGrid);
     GRID_ASSERT( P.Mode=="none" || P.Mode=="frozen" || P.Mode=="recoarsen" || P.Mode=="refresh" || P.Mode=="perturbative" || P.Mode=="control" );
@@ -226,9 +244,15 @@ int main (int argc, char ** argv)
     GRID_ASSERT( P.DiagReference!=2 || P.Mode=="refresh" );
     GRID_ASSERT( P.DiagTestRounds.size()>0 && P.DiagTestRounds[0]>=1 );
     for(int d=1;d<P.DiagTestRounds.size();d++) GRID_ASSERT( P.DiagTestRounds[d]>P.DiagTestRounds[d-1] );
+    // The twin refreshes each vector on its own, which is the run's refresh only without RefreshOrthonormalise
+    GRID_ASSERT( !TwinUpdate || (P.Mode=="refresh" && P.RefreshKick>0.0 && P.DiagReference==2 && !P.RefreshOrthonormalise) );
+    GRID_ASSERT( !TwinBaseline || (TwinUpdate && TwinBaseline<=NBASIS && TwinBaselineEvery>=1) );
+    GRID_ASSERT( SolveMGEvery>=1 );
     std::cout << GridLogMessage << "QuenchedHMCDriver parameters ("
               << (pfile.length() ? pfile : std::string("defaults")) << "):" << std::endl;
     std::cout << P << std::endl;
+    std::cout << GridLogMessage << "QHMC-PARAMS-OPTIONAL TwinUpdate " << TwinUpdate << " TwinBaseline " << TwinBaseline
+              << " TwinBaselineEvery " << TwinBaselineEvery << " SolveMGEvery " << SolveMGEvery << std::endl;
   }
 
   Coordinate latt = GridDefaultLatt();
@@ -374,6 +398,17 @@ int main (int argc, char ** argv)
   //   QHMC-CR         (DiagCR > 0): compatible relaxation, the solver's fine smoother
   //                 on A e = 0 with (1 - P P^dag) after each sweep, from DiagCRVectors
   //                 noise vectors: ||e_k||/||e_{k-1}|| and ||A e_k||/||A e_{k-1}|| per sweep
+  // With TwinUpdate 1 (DiagReference 2), F the refresh, v a basis vector before the
+  // update and eta its kick:
+  //   QHMC-TWIN-KICK  nul of v, of eta and of v + eps eta, and cos(v, v + eps eta)
+  //   QHMC-TWIN       after each pass: cos(F(v + eps eta), F(v)) and the nul and GCR
+  //                 steps of both; with the baseline, also cos(F(v + eps eta), F(eta)),
+  //                 cos(F(v), F(eta)), and the nul and steps of F(eta)
+  //   QHMC-DIAG-TWIN-GRAM, -TWIN-ANGLES, -TWIN-GLOB (DiagBlockGram 1): the block and
+  //                 global Gram of the twin basis F(V), the collapse without the kick;
+  //                 principal angles between its block spans and the run's; and
+  //                 between the two global spans
+  // The twin basis is NBASIS fp32 fields; the per-vector work 5 fp64 fields more.
   // Uses PVdagM, not the counted operator, so update_matvecs is unchanged.
   // Device memory: the reference is NBASIS fp32 fields (half the basis), the
   // test vectors DiagTest x (number of depths) fp32 fields and DiagTest fp64
@@ -390,9 +425,92 @@ int main (int argc, char ** argv)
   std::vector<Eigen::MatrixXcd> DiagGramRef;    // the same for the rolling reference, when they match it
   int DiagBasisVersion = 0;                     // counts the updates of the basis
   int DiagGramVersion  = -1;                    // DiagBasisVersion when DiagGramKeep was taken
+  std::vector<LatticeFermionF> TwinF;           // TwinUpdate: the twin basis F(V) of the last update
+  int TwinVersion      = -1;                    // DiagBasisVersion of the basis TwinF was refreshed next to
   const int DiagChunk = 10;
   GridCartesian *BlockGrid = P.DiagEvery ? BasisBlockGrid(FGrid,CGrids.Coarse5d) : nullptr;
   auto DiagStep = [&](int step) -> bool { return P.DiagEvery && step%P.DiagEvery==0; };
+  // Principal cosines as mean sin^2, smallest cosine, and counts above 0.99 and 0.9
+  auto PrincipalStats = [&](const std::vector<RealD> &cosv) -> std::string
+  {
+    RealD sin2 = 0.0;
+    int n99 = 0, n90 = 0;
+    for(auto c : cosv){ sin2 += (1.0-c*c)/cosv.size(); n99 += (c>0.99); n90 += (c>0.9); }
+    std::ostringstream s;
+    s.precision(6);
+    s << " sin2_mean " << sin2 << " cos_min " << cosv.back() << " n_cos99 " << n99 << " n_cos90 " << n90;
+    return s.str();
+  };
+  // QHMC-DIAG-<tag>, -SPEC, -GSPEC and -LIST: the block and global Gram of a basis W,
+  // fp64 or fp32; keep receives its per-block Grams and G its global Gram
+  auto ReportGram = [&](const std::string &tag,int traj,int step,auto &W,
+                        std::vector<Eigen::MatrixXcd> &keep,Eigen::MatrixXcd &G)
+  {
+    RealD t_gram = -usecond();
+    std::vector<RealD> lmin, kappa, deff, pres, gmean, logspec;
+    const std::vector<RealD> taus({1.0e-2,1.0e-3,1.0e-4});
+    std::vector<std::vector<RealD> > rank;
+    std::vector<RealD> glspec;
+    BasisBlockGram<LatticeFermionD>(W,FGrid,BlockGrid,lmin,kappa,deff,pres,gmean,taus,rank,logspec,glspec,&keep,&G);
+    RealD glogdet = 0.0;                                   // log det C of the unblocked basis
+    for(auto x : glspec) glogdet += std::log(std::max(x,1.0e-16));
+    t_gram = (t_gram+usecond())/1.0e6;
+    std::vector<RealD> ql = BasisQuantiles(lmin, {0.0,0.1,0.5});
+    std::vector<RealD> qk = BasisQuantiles(kappa,{0.5,0.9,1.0});
+    std::vector<RealD> qe = BasisQuantiles(deff, {0.0,0.1,0.5,1.0});
+    std::vector<RealD> qp = BasisQuantiles(pres, {0.0,0.1,0.5});
+    std::vector<RealD> qg = BasisQuantiles(gmean,{0.0,0.1,0.5});
+    std::ostringstream gram;
+    gram.precision(6);
+    gram << "QHMC-DIAG-" << tag << " traj " << traj << " step " << step << " N " << W.size() << " nblocks " << lmin.size()
+         << " lmin_p0 " << ql[0] << " lmin_p10 " << ql[1] << " lmin_p50 " << ql[2]
+         << " kappa_p50 " << qk[0] << " kappa_p90 " << qk[1] << " kappa_max " << qk[2]
+         << " deff_p0 " << qe[0] << " deff_p10 " << qe[1] << " deff_p50 " << qe[2] << " deff_max " << qe[3]
+         << " pres_p0 " << qp[0] << " pres_p10 " << qp[1] << " pres_p50 " << qp[2]
+         << " gmean_p0 " << qg[0] << " gmean_p10 " << qg[1] << " gmean_p50 " << qg[2];
+    const char *tname[3] = {"rank2","rank3","rank4"};
+    for(int t=0;t<3;t++){
+      std::vector<RealD> qr = BasisQuantiles(rank[t],{0.0,0.1,0.5});
+      gram << " " << tname[t] << "_p0 " << qr[0] << " " << tname[t] << "_p10 " << qr[1] << " " << tname[t] << "_p50 " << qr[2];
+    }
+    gram << " glob_lmin " << glspec.front() << " glob_lmax " << glspec.back()
+         << " glob_logdet " << glogdet << " glob_gmean " << std::exp(glogdet/glspec.size());
+    for(int t=0;t<3;t++){
+      int c = 0;
+      for(auto x : glspec) c += (x > taus[t]);
+      gram << " glob_" << tname[t] << " " << c;
+    }
+    gram << " seconds " << t_gram;
+    std::cout << GridLogMessage << gram.str() << std::endl;
+    std::vector<RealD> spec;
+    for(auto x : logspec) spec.push_back(std::exp(x));
+    std::cout << GridLogMessage << "QHMC-DIAG-" << tag << "-SPEC traj " << traj << " step " << step
+              << " lambda " << BasisList(spec) << std::endl;
+    std::cout << GridLogMessage << "QHMC-DIAG-" << tag << "-GSPEC traj " << traj << " step " << step
+              << " lambda " << BasisList(glspec) << std::endl;
+    std::cout << GridLogMessage << "QHMC-DIAG-" << tag << "-LIST traj " << traj << " step " << step
+              << " lmin_worst " << BasisBlockWorst(BlockGrid,lmin,10,false)
+              << " pres_worst " << BasisBlockWorst(BlockGrid,pres,10,false) << std::endl;
+  };
+  // QHMC-DIAG-<tag> and -LIST: principal angles between the block spans of W (its
+  // per-block Grams GW) and of the current basis V (its per-block Grams GV)
+  auto ReportAngles = [&](const std::string &tag,int traj,int step,std::vector<LatticeFermionF> &W,
+                          const std::vector<Eigen::MatrixXcd> &GW,std::vector<LatticeFermionD> &V,
+                          const std::vector<Eigen::MatrixXcd> &GV)
+  {
+    RealD t_ang = -usecond();
+    std::vector<RealD> sin2, cmin;
+    BasisBlockAngles(W,GW,V,GV,BlockGrid,1.0e-10,sin2,cmin);
+    t_ang = (t_ang+usecond())/1.0e6;
+    std::vector<RealD> qs = BasisQuantiles(sin2,{0.1,0.5,0.9,1.0});
+    std::vector<RealD> qc = BasisQuantiles(cmin,{0.0,0.1,0.5});
+    std::cout << GridLogMessage << "QHMC-DIAG-" << tag << " traj " << traj << " step " << step
+              << " sin2_p10 " << qs[0] << " sin2_p50 " << qs[1] << " sin2_p90 " << qs[2] << " sin2_max " << qs[3]
+              << " cmin_p0 " << qc[0] << " cmin_p10 " << qc[1] << " cmin_p50 " << qc[2]
+              << " seconds " << t_ang << std::endl;
+    std::cout << GridLogMessage << "QHMC-DIAG-" << tag << "-LIST traj " << traj << " step " << step
+              << " sin2_worst " << BasisBlockWorst(BlockGrid,sin2,10,true) << std::endl;
+  };
   auto MakeTest = [&]()
   {
     DiagT.assign(P.DiagTest*P.DiagTestRounds.size(),LatticeFermionF(FGridsF.FGridF));
@@ -457,14 +575,10 @@ int main (int argc, char ** argv)
       Eigen::MatrixXcd GV = BasisCrossGram(V,V);
       Eigen::MatrixXcd C  = BasisCrossGram(DiagRef,V);
       std::vector<RealD> cosv = PrincipalCosines(DiagGW,GV,C);
-      RealD sin2 = 0.0;
-      int n99 = 0, n90 = 0;
-      for(auto c : cosv){ sin2 += (1.0-c*c)/cosv.size(); n99 += (c>0.99); n90 += (c>0.9); }
       std::vector<RealD> loc, glob;
       BasisRepresentation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,Q,FGrid,CGrids.Coarse5d,
                                                                        DiagRef,DiagChunk,loc,glob);
-      line << " sin2_mean " << sin2 << " cos_min " << cosv.back() << " n_cos99 " << n99 << " n_cos90 " << n90
-           << BasisStat("ref_loc",loc) << BasisStat("ref_glob",glob);
+      line << PrincipalStats(cosv) << BasisStat("ref_loc",loc) << BasisStat("ref_glob",glob);
       lists << " cos " << BasisList(cosv) << " ref_loc " << BasisList(loc);
       if ( P.DiagReference==2 ) {
         std::vector<RealD> pc = BasisPairCosines(DiagRef,V);
@@ -478,67 +592,33 @@ int main (int argc, char ** argv)
       DiagTFresh = false;
     }
     if ( P.DiagBlockGram ) {
-      RealD t_gram = -usecond();
-      std::vector<RealD> lmin, kappa, deff, pres, gmean, logspec;
-      const std::vector<RealD> taus({1.0e-2,1.0e-3,1.0e-4});
-      std::vector<std::vector<RealD> > rank;
-      std::vector<RealD> glspec;
-      BasisBlockGram(V,BlockGrid,lmin,kappa,deff,pres,gmean,taus,rank,logspec,glspec,&DiagGramKeep);
-      RealD glogdet = 0.0;                                   // log det C of the unblocked basis
-      for(auto x : glspec) glogdet += std::log(std::max(x,1.0e-16));
+      Eigen::MatrixXcd GV;
+      ReportGram("GRAM",traj,step,V,DiagGramKeep,GV);
       DiagGramVersion = DiagBasisVersion;
-      t_gram = (t_gram+usecond())/1.0e6;
-      std::vector<RealD> ql = BasisQuantiles(lmin, {0.0,0.1,0.5});
-      std::vector<RealD> qk = BasisQuantiles(kappa,{0.5,0.9,1.0});
-      std::vector<RealD> qe = BasisQuantiles(deff, {0.0,0.1,0.5,1.0});
-      std::vector<RealD> qp = BasisQuantiles(pres, {0.0,0.1,0.5});
-      std::vector<RealD> qg = BasisQuantiles(gmean,{0.0,0.1,0.5});
-      std::ostringstream gram;
-      gram.precision(6);
-      gram << "QHMC-DIAG-GRAM traj " << traj << " step " << step << " N " << V.size() << " nblocks " << lmin.size()
-           << " lmin_p0 " << ql[0] << " lmin_p10 " << ql[1] << " lmin_p50 " << ql[2]
-           << " kappa_p50 " << qk[0] << " kappa_p90 " << qk[1] << " kappa_max " << qk[2]
-           << " deff_p0 " << qe[0] << " deff_p10 " << qe[1] << " deff_p50 " << qe[2] << " deff_max " << qe[3]
-           << " pres_p0 " << qp[0] << " pres_p10 " << qp[1] << " pres_p50 " << qp[2]
-           << " gmean_p0 " << qg[0] << " gmean_p10 " << qg[1] << " gmean_p50 " << qg[2];
-      const char *tname[3] = {"rank2","rank3","rank4"};
-      for(int t=0;t<3;t++){
-        std::vector<RealD> qr = BasisQuantiles(rank[t],{0.0,0.1,0.5});
-        gram << " " << tname[t] << "_p0 " << qr[0] << " " << tname[t] << "_p10 " << qr[1] << " " << tname[t] << "_p50 " << qr[2];
-      }
-      gram << " glob_lmin " << glspec.front() << " glob_lmax " << glspec.back()
-           << " glob_logdet " << glogdet << " glob_gmean " << std::exp(glogdet/glspec.size());
-      for(int t=0;t<3;t++){
-        int c = 0;
-        for(auto x : glspec) c += (x > taus[t]);
-        gram << " glob_" << tname[t] << " " << c;
-      }
-      gram << " seconds " << t_gram;
-      std::cout << GridLogMessage << gram.str() << std::endl;
-      std::vector<RealD> spec;
-      for(auto x : logspec) spec.push_back(std::exp(x));
-      std::cout << GridLogMessage << "QHMC-DIAG-GRAM-SPEC traj " << traj << " step " << step
-                << " lambda " << BasisList(spec) << std::endl;
-      std::cout << GridLogMessage << "QHMC-DIAG-GRAM-GSPEC traj " << traj << " step " << step
-                << " lambda " << BasisList(glspec) << std::endl;
       if ( P.DiagReference==2 && DiagGramRef.size() ) {
-        RealD t_ang = -usecond();
-        std::vector<RealD> sin2, cmin;
-        BasisBlockAngles(DiagRef,DiagGramRef,V,DiagGramKeep,BlockGrid,1.0e-10,sin2,cmin);
-        t_ang = (t_ang+usecond())/1.0e6;
-        std::vector<RealD> qs = BasisQuantiles(sin2,{0.1,0.5,0.9,1.0});
-        std::vector<RealD> qc = BasisQuantiles(cmin,{0.0,0.1,0.5});
-        std::cout << GridLogMessage << "QHMC-DIAG-ANGLES traj " << traj << " step " << step
-                  << " sin2_p10 " << qs[0] << " sin2_p50 " << qs[1] << " sin2_p90 " << qs[2] << " sin2_max " << qs[3]
-                  << " cmin_p0 " << qc[0] << " cmin_p10 " << qc[1] << " cmin_p50 " << qc[2]
-                  << " seconds " << t_ang << std::endl;
-        std::cout << GridLogMessage << "QHMC-DIAG-ANGLES-LIST traj " << traj << " step " << step
-                  << " sin2_worst " << BasisBlockWorst(BlockGrid,sin2,10,true) << std::endl;
+        ReportAngles("ANGLES",traj,step,DiagRef,DiagGramRef,V,DiagGramKeep);
         DiagGramRef.clear();
       }
-      std::cout << GridLogMessage << "QHMC-DIAG-GRAM-LIST traj " << traj << " step " << step
-                << " lmin_worst " << BasisBlockWorst(BlockGrid,lmin,10,false)
-                << " pres_worst " << BasisBlockWorst(BlockGrid,pres,10,false) << std::endl;
+      if ( TwinVersion==DiagBasisVersion ) {
+        // The twin basis F(V), refreshed without the kick in this update, against the run's
+        std::vector<Eigen::MatrixXcd> GTb;
+        Eigen::MatrixXcd GT;
+        ReportGram("TWIN-GRAM",traj,step,TwinF,GTb,GT);
+        ReportAngles("TWIN-ANGLES",traj,step,TwinF,GTb,V,DiagGramKeep);
+        RealD t_glob = -usecond();
+        std::ostringstream glob;
+        glob.precision(6);
+        glob << "QHMC-DIAG-TWIN-GLOB traj " << traj << " step " << step;
+        // PrincipalCosines asserts on a Gram that is not positive definite in working precision
+        if ( Eigen::LLT<Eigen::MatrixXcd>(GT).info()==Eigen::Success && Eigen::LLT<Eigen::MatrixXcd>(GV).info()==Eigen::Success ) {
+          std::vector<RealD> cosv = PrincipalCosines(GT,GV,BasisCrossGram(TwinF,V));
+          t_glob = (t_glob+usecond())/1.0e6;
+          glob << PrincipalStats(cosv) << " seconds " << t_glob << " cos " << BasisList(cosv);
+        } else {
+          glob << " singular 1";
+        }
+        std::cout << GridLogMessage << glob.str() << std::endl;
+      }
     }
     if ( P.DiagBlockNul ) {
       RealD t_bn = -usecond();
@@ -795,16 +875,112 @@ int main (int argc, char ** argv)
           if ( DiagGramVersion==DiagBasisVersion ) DiagGramRef = std::move(DiagGramKeep);
           t_overlap += usecond();
         }
+        const bool site = P.RefreshKickShape=="site";
         std::vector<int> steps;
-        for(int p=0;p<P.RefreshPasses;p++){
-          if ( p==0 && P.RefreshKick>0.0 ) {
-            if ( P.RefreshKickShape=="site" ) KickBasisSite(Coarsening.rawNull,RNGkick,P.RefreshKick);
-            else                              KickBasis    (Coarsening.rawNull,RNGkick,P.RefreshKick);
-            if ( overlap ) Overlap("kick");
+        if ( overlap && TwinUpdate ) {
+          // Each vector on its own, in index order (RefreshOrthonormalise 0, so this is the
+          // same refresh): its kick draws the same noise as KickBasis, and the run's basis
+          // is the one it would be without the twin.  The run's vector F(v + eps eta) with
+          // the counted operator; its twin F(v), from the unkicked v, and for the baseline
+          // vectors the noise alone F(eta), with PVdagM.  Stage 0 is after the kick, p+1
+          // after pass p.  Everything but the run's kick and passes is kept out of
+          // update_seconds.
+          const int  np   = P.RefreshPasses;
+          const bool base = TwinBaseline>0 && step%TwinBaselineEvery==0;
+          std::vector<int> bidx;                                       // the baseline vectors, evenly spaced
+          if ( base ) for(int k=0;k<TwinBaseline;k++) bidx.push_back((k*NBASIS)/TwinBaseline);
+          if ( TwinF.size()!=NBASIS ) TwinF.assign(NBASIS,LatticeFermionF(FGridsF.FGridF));
+          std::vector<LatticeFermionD> run(1,FGrid), tw(1,FGrid), bl(1,FGrid);
+          LatticeFermionD eta(FGrid), Av(FGrid);
+          typedef std::vector<std::vector<RealD> > Table;
+          Table cos_ref(np+1,std::vector<RealD>(NBASIS)), cos_twin(np,std::vector<RealD>(NBASIS));
+          Table nul_run(np,std::vector<RealD>(NBASIS)), nul_twin(np,std::vector<RealD>(NBASIS));
+          Table steps_run(np,std::vector<RealD>(NBASIS)), steps_twin(np,std::vector<RealD>(NBASIS));
+          Table cos_base(np), cos_tb(np), nul_base(np), steps_base(np);
+          std::vector<RealD> nul_v(NBASIS), nul_eta(NBASIS), nul_kick(NBASIS);
+          steps.assign(NBASIS,0);
+          RealD t_twin = 0.0;
+          for(int b=0,kb=0;b<NBASIS;b++){
+            LatticeFermionD &v = Coarsening.rawNull[b];
+            const bool isb = kb<(int)bidx.size() && bidx[kb]==b;
+            t_twin -= usecond();
+            tw[0] = v;
+            t_twin += usecond();
+            KickVector(v,eta,RNGkick,P.RefreshKick,site);
+            t_twin -= usecond();
+            nul_v[b]    = BasisVectorNulliness(tw[0],PVdagM,Av);
+            nul_eta[b]  = BasisVectorNulliness(eta,PVdagM,Av);
+            nul_kick[b] = BasisVectorNulliness(v,PVdagM,Av);
+            cos_ref[0][b] = BasisCosine(tw[0],v);
+            if ( isb ) bl[0] = eta;
+            run[0] = v;
+            t_twin += usecond();
+            for(int p=0;p<np;p++){
+              steps_run[p][b] = RefineBasisGCR(run,CountedPVdagM,1,P.RefreshTol,P.RefreshMaxOuter)[0];
+              t_twin -= usecond();
+              steps_twin[p][b] = RefineBasisGCR(tw,PVdagM,1,P.RefreshTol,P.RefreshMaxOuter)[0];
+              BasisFieldCopy(DiagRef[b],Av);
+              cos_ref[p+1][b] = BasisCosine(Av,run[0]);
+              cos_twin[p][b]  = BasisCosine(run[0],tw[0]);
+              nul_run[p][b]   = BasisVectorNulliness(run[0],PVdagM,Av);
+              nul_twin[p][b]  = BasisVectorNulliness(tw[0],PVdagM,Av);
+              if ( isb ) {
+                steps_base[p].push_back(RefineBasisGCR(bl,PVdagM,1,P.RefreshTol,P.RefreshMaxOuter)[0]);
+                cos_base[p].push_back(BasisCosine(run[0],bl[0]));
+                cos_tb[p].push_back(BasisCosine(tw[0],bl[0]));
+                nul_base[p].push_back(BasisVectorNulliness(bl[0],PVdagM,Av));
+              }
+              t_twin += usecond();
+            }
+            v = run[0];
+            steps[b] = steps_run[np-1][b];
+            t_twin -= usecond();
+            precisionChange(TwinF[b],tw[0]);
+            t_twin += usecond();
+            kb += isb;
           }
-          steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
-          if ( P.RefreshOrthonormalise ) OrthonormaliseBasis(Coarsening.rawNull);
-          if ( overlap ) Overlap("pass"+std::to_string(p+1));
+          t_twin -= usecond();
+          std::cout << GridLogMessage << "QHMC-TWIN-KICK traj " << traj << " step " << step << " kick " << P.RefreshKick
+                    << BasisStat("nul_v",nul_v) << BasisStat("nul_eta",nul_eta) << BasisStat("nul_kick",nul_kick)
+                    << BasisStat("cos",cos_ref[0]) << std::endl;
+          std::cout << GridLogMessage << "QHMC-TWIN-KICK-LIST traj " << traj << " step " << step
+                    << " nul_v " << BasisList(nul_v) << " nul_eta " << BasisList(nul_eta)
+                    << " nul_kick " << BasisList(nul_kick) << " cos " << BasisList(cos_ref[0]) << std::endl;
+          for(int k=0;k<=np;k++)                                       // as Overlap: cos(v_old, the run's vector)
+            std::cout << GridLogMessage << "QHMC-OVERLAP traj " << traj << " step " << step
+                      << " stage " << (k ? "pass"+std::to_string(k) : std::string("kick"))
+                      << BasisStat("cos",cos_ref[k]) << " list " << BasisList(cos_ref[k]) << std::endl;
+          std::vector<RealD> bidxr(bidx.begin(),bidx.end());
+          for(int p=0;p<np;p++){
+            std::ostringstream line, list;
+            line << "QHMC-TWIN traj " << traj << " step " << step << " pass " << p+1
+                 << BasisStat("cos_twin",cos_twin[p]) << BasisStat("nul_run",nul_run[p]) << BasisStat("nul_twin",nul_twin[p])
+                 << BasisStat("steps_run",steps_run[p]) << BasisStat("steps_twin",steps_twin[p]) << " baseline " << bidx.size();
+            list << "QHMC-TWIN-LIST traj " << traj << " step " << step << " pass " << p+1
+                 << " cos_twin " << BasisList(cos_twin[p]) << " nul_run " << BasisList(nul_run[p])
+                 << " nul_twin " << BasisList(nul_twin[p]);
+            if ( base ) {
+              line << BasisStat("cos_base",cos_base[p]) << BasisStat("cos_tb",cos_tb[p]) << BasisStat("nul_base",nul_base[p])
+                   << BasisStat("steps_base",steps_base[p]);
+              list << " base_idx " << BasisList(bidxr) << " cos_base " << BasisList(cos_base[p])
+                   << " cos_tb " << BasisList(cos_tb[p]) << " nul_base " << BasisList(nul_base[p]);
+            }
+            std::cout << GridLogMessage << line.str() << std::endl;
+            std::cout << GridLogMessage << list.str() << std::endl;
+          }
+          TwinVersion = DiagBasisVersion+1;                            // the basis after this update
+          t_twin += usecond();
+          t_overlap += t_twin;
+        } else {
+          for(int p=0;p<P.RefreshPasses;p++){
+            if ( p==0 && P.RefreshKick>0.0 ) {
+              KickBasis(Coarsening.rawNull,RNGkick,P.RefreshKick,site);
+              if ( overlap ) Overlap("kick");
+            }
+            steps = RefineBasisGCR(Coarsening.rawNull,CountedPVdagM,NBASIS,P.RefreshTol,P.RefreshMaxOuter);
+            if ( P.RefreshOrthonormalise ) OrthonormaliseBasis(Coarsening.rawNull);
+            if ( overlap ) Overlap("pass"+std::to_string(p+1));
+          }
         }
         for(auto s : steps) update_steps += (RealD)s/steps.size();
         t_update -= t_overlap;
@@ -845,33 +1021,40 @@ int main (int argc, char ** argv)
     }
     Diagnose(traj,step);
 
-    RealD t_solve = -usecond();
-    PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
-    if ( DiagStep(step) && P.DiagCR>0 ) {
-      // Compatible relaxation with this solve's own fine smoother; kept out of solve_seconds
-      RealD t_cr = -usecond();
-      std::vector<RealD> err, res;
-      BasisCompatibleRelaxation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,PVdagM,Solver.SmootherGCR,
-                                                                            FGrid,CGrids.Coarse5d,RNGcr,P.DiagCRVectors,P.DiagCR,err,res);
-      t_cr = (t_cr+usecond())/1.0e6;
-      t_solve -= t_cr*1.0e6;
-      RealD rerr = 1.0, rres = 1.0;              // geometric mean over the second half of the sweeps
-      int k0 = P.DiagCR/2, nk = P.DiagCR-k0;
-      for(int k=k0;k<P.DiagCR;k++){ rerr *= std::pow(err[k],1.0/nk); rres *= std::pow(res[k],1.0/nk); }
-      std::cout << GridLogMessage << "QHMC-CR traj " << traj << " step " << step << " sweeps " << P.DiagCR
-                << " vectors " << P.DiagCRVectors << " rate_err " << rerr << " rate_res " << rres
-                << " err " << BasisList(err) << " res " << BasisList(res) << " seconds " << t_cr << std::endl;
+    const bool mgsolve = step%SolveMGEvery==0;
+    const bool cr      = DiagStep(step) && P.DiagCR>0;
+    RealD t_solve = 0.0;
+    if ( mgsolve || cr ) {
+      t_solve = -usecond();
+      PVdagMMultiGridSolver<MobiusFermionD,MobiusFermionF,Coarsening_t> Solver(Ddwf,Dpv,DdwfF,DpvF,Coarsening,P.MultiGrid,P.Nrhs);
+      if ( cr ) {
+        // Compatible relaxation with this solve's own fine smoother; kept out of solve_seconds
+        RealD t_cr = -usecond();
+        std::vector<RealD> err, res;
+        BasisCompatibleRelaxation<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,PVdagM,Solver.SmootherGCR,
+                                                                              FGrid,CGrids.Coarse5d,RNGcr,P.DiagCRVectors,P.DiagCR,err,res);
+        t_cr = (t_cr+usecond())/1.0e6;
+        t_solve -= t_cr*1.0e6;
+        RealD rerr = 1.0, rres = 1.0;              // geometric mean over the second half of the sweeps
+        int k0 = P.DiagCR/2, nk = P.DiagCR-k0;
+        for(int k=k0;k<P.DiagCR;k++){ rerr *= std::pow(err[k],1.0/nk); rres *= std::pow(res[k],1.0/nk); }
+        std::cout << GridLogMessage << "QHMC-CR traj " << traj << " step " << step << " sweeps " << P.DiagCR
+                  << " vectors " << P.DiagCRVectors << " rate_err " << rerr << " rate_res " << rres
+                  << " err " << BasisList(err) << " res " << BasisList(res) << " seconds " << t_cr << std::endl;
+      }
+      if ( mgsolve ) {
+        for(int r=0;r<P.Nrhs;r++) mdsol[r]=Zero();
+        Solver.Solve(mdsrc,mdsol);
+      }
+      t_solve = (t_solve+usecond())/1.0e6;
     }
-    for(int r=0;r<P.Nrhs;r++) mdsol[r]=Zero();
-    Solver.Solve(mdsrc,mdsol);
-    t_solve = (t_solve+usecond())/1.0e6;
     RealD mem_solve = FreeDeviceMB();
     std::cout << GridLogMessage << "QHMC-SOLVE traj " << traj << " step " << step << " t_MD " << t_MD
               << " import_seconds " << t_import << " rebuild_seconds " << t_rebuild
               << " solve_seconds " << t_solve << " null_resid " << null_resid
               << " null_before " << null_before << " update_seconds " << t_update
               << " update_matvecs " << mv_update << " update_steps " << update_steps
-              << " gram_cond " << gram_cond << std::endl;
+              << " gram_cond " << gram_cond << " mg_solve " << mgsolve << std::endl;
     std::cout << GridLogMessage << "QHMC-MEM traj " << traj << " step " << step
               << " free_start_MB " << mem_start << " free_update_MB " << mem_update
               << " free_rebuild_MB " << mem_rebuild << " free_solve_MB " << mem_solve

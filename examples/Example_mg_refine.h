@@ -76,40 +76,39 @@ void OrthonormaliseBasis(std::vector<Field> &V)
 }
 
 //////////////////////////////////////////////////////////////////////////////
-// v -> v + kick |v| eta/|eta|, eta Gaussian, before an inverse-iteration pass,
-// which smooths the noise into a fresh low-mode component.  Keeps the basis a
-// random sample of the low-mode band instead of converging to the lowest
-// eigenspace under repeated passes.
+// v -> v + kick |v| eta/|eta| for one vector, eta Gaussian, before an
+// inverse-iteration pass, which smooths the noise into a fresh low-mode
+// component.  With site, the noise is first shaped to v site by site,
+// eta(x) -> |v(x)| eta(x), |v(x)| the norm of v on 5d site x, so the kick is
+// about kick relative to v on every site and follows v's peaking in s at the
+// walls instead of spreading evenly over Ls.  On return eta holds the noise as
+// added, kick |v| eta/|eta|, so a caller can refresh it on its own.
 //////////////////////////////////////////////////////////////////////////////
 template<class Field>
-void KickBasis(std::vector<Field> &V, GridParallelRNG &RNG, RealD kick)
-{
-  Field eta(V[0].Grid());
-  for(auto &v : V){
-    gaussian(RNG,eta);
-    v = v + (kick*std::sqrt(norm2(v)/norm2(eta)))*eta;
-  }
-}
-
-//////////////////////////////////////////////////////////////////////////////
-// As KickBasis, with the noise shaped to v site by site: eta(x) -> |v(x)| eta(x),
-// |v(x)| the norm of v on 5d site x, before the global rescale to kick |v|.
-// The kick is then about kick relative to v on every site, so it follows v's
-// peaking in s at the walls instead of spreading evenly over Ls.
-//////////////////////////////////////////////////////////////////////////////
-template<class Field>
-void KickBasisSite(std::vector<Field> &V, GridParallelRNG &RNG, RealD kick)
+void KickVector(Field &v, Field &eta, GridParallelRNG &RNG, RealD kick, bool site)
 {
   typedef Lattice<typename Field::vector_object::tensor_reduced> ComplexField;   // LatticeComplex of Field's precision
-  Field eta(V[0].Grid());
-  ComplexField scale(V[0].Grid());
-  for(auto &v : V){
-    gaussian(RNG,eta);
+  gaussian(RNG,eta);
+  if ( site ) {
+    ComplexField scale(v.Grid());
     scale = localNorm2(v);           // |v(x)|^2 on each site
     scale = sqrt(scale);             // |v(x)|: the noise amplitude follows v's
     eta   = scale*eta;
-    v = v + (kick*std::sqrt(norm2(v)/norm2(eta)))*eta;
   }
+  eta = (kick*std::sqrt(norm2(v)/norm2(eta)))*eta;
+  v   = v + eta;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// KickVector on every basis vector, in index order.  Keeps the basis a random
+// sample of the low-mode band instead of converging to the lowest eigenspace
+// under repeated passes.
+//////////////////////////////////////////////////////////////////////////////
+template<class Field>
+void KickBasis(std::vector<Field> &V, GridParallelRNG &RNG, RealD kick, bool site)
+{
+  Field eta(V[0].Grid());
+  for(auto &v : V) KickVector(v,eta,RNG,kick,site);
 }
 
 NAMESPACE_END(Grid);
