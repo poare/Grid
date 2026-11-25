@@ -528,6 +528,10 @@ int main (int argc, char ** argv)
       BasisDefect<LatticeFermionD,Coarsening_t::CoarseVector>(Coarsening.MrhsProjectorL1,PVdagM,Q,FGrid,CGrids.Coarse5d,BlockGrid,
                                                                DiagT,d*P.DiagTest,P.DiagTest,DiagChunk,
                                                                defect,adefect,glob,nul,blocks);
+      std::vector<LatticeFermionD> tf(P.DiagTest,FGrid);
+      std::vector<RealD> tnul, rq;                                // rq = |<t|A t>|/||t||^2
+      for(int i=0;i<P.DiagTest;i++) BasisFieldCopy(DiagT[d*P.DiagTest+i],tf[i]);
+      BasisNulliness(tf,PVdagM,tnul,rq);
       std::string worst;
       for(auto &b : blocks){
         std::vector<RealD> q = BasisQuantiles(b,{0.5,0.9,1.0});
@@ -544,7 +548,7 @@ int main (int argc, char ** argv)
       list << "QHMC-DIAG-" << tag << "-LIST traj " << traj << " step " << step << " rounds " << P.DiagTestRounds[d]
            << " defect " << BasisList(defect) << " adefect " << BasisList(adefect);
       if ( Q ) list << " glob " << BasisList(glob);
-      list << " nul " << BasisList(nul) << " blk_p50 " << BasisList(p50) << " blk_p90 " << BasisList(p90)
+      list << " nul " << BasisList(nul) << " rq " << BasisList(rq) << " blk_p50 " << BasisList(p50) << " blk_p90 " << BasisList(p90)
            << " blk_max " << BasisList(bmax) << " blk_worst " << worst;
       std::cout << GridLogMessage << line.str() << std::endl;
       std::cout << GridLogMessage << list.str() << std::endl;
@@ -900,6 +904,9 @@ int main (int argc, char ** argv)
           std::vector<RealD> nul_v(NBASIS), nul_eta(NBASIS), nul_kick(NBASIS);
           steps.assign(NBASIS,0);
           RealD t_twin = 0.0;
+          auto RQ = [&](const LatticeFermionD &x) -> RealD { return abs(innerProduct(x,Av)) / norm2(x); };   // after BasisVectorNulliness(x,..,Av)
+          Table rq_run(np,std::vector<RealD>(NBASIS)), rq_twin(np,std::vector<RealD>(NBASIS)), rq_base(np);
+          std::vector<RealD> rq_v(NBASIS), rq_eta(NBASIS), rq_kick(NBASIS);
           for(int b=0,kb=0;b<NBASIS;b++){
             LatticeFermionD &v = Coarsening.rawNull[b];
             const bool isb = kb<(int)bidx.size() && bidx[kb]==b;
@@ -908,9 +915,9 @@ int main (int argc, char ** argv)
             t_twin += usecond();
             KickVector(v,eta,RNGkick,P.RefreshKick,site);
             t_twin -= usecond();
-            nul_v[b]    = BasisVectorNulliness(tw[0],PVdagM,Av);
-            nul_eta[b]  = BasisVectorNulliness(eta,PVdagM,Av);
-            nul_kick[b] = BasisVectorNulliness(v,PVdagM,Av);
+            nul_v[b]    = BasisVectorNulliness(tw[0],PVdagM,Av); rq_v[b]    = RQ(tw[0]);
+            nul_eta[b]  = BasisVectorNulliness(eta,PVdagM,Av);   rq_eta[b]  = RQ(eta);
+            nul_kick[b] = BasisVectorNulliness(v,PVdagM,Av);     rq_kick[b] = RQ(v);
             cos_ref[0][b] = BasisCosine(tw[0],v);
             if ( isb ) bl[0] = eta;
             run[0] = v;
@@ -922,13 +929,14 @@ int main (int argc, char ** argv)
               BasisFieldCopy(DiagRef[b],Av);
               cos_ref[p+1][b] = BasisCosine(Av,run[0]);
               cos_twin[p][b]  = BasisCosine(run[0],tw[0]);
-              nul_run[p][b]   = BasisVectorNulliness(run[0],PVdagM,Av);
-              nul_twin[p][b]  = BasisVectorNulliness(tw[0],PVdagM,Av);
+              nul_run[p][b]   = BasisVectorNulliness(run[0],PVdagM,Av); rq_run[p][b]  = RQ(run[0]);
+              nul_twin[p][b]  = BasisVectorNulliness(tw[0],PVdagM,Av);  rq_twin[p][b] = RQ(tw[0]);
               if ( isb ) {
                 steps_base[p].push_back(RefineBasisGCR(bl,PVdagM,1,P.RefreshTol,P.RefreshMaxOuter)[0]);
                 cos_base[p].push_back(BasisCosine(run[0],bl[0]));
                 cos_tb[p].push_back(BasisCosine(tw[0],bl[0]));
                 nul_base[p].push_back(BasisVectorNulliness(bl[0],PVdagM,Av));
+                rq_base[p].push_back(RQ(bl[0]));
               }
               t_twin += usecond();
             }
@@ -945,7 +953,8 @@ int main (int argc, char ** argv)
                     << BasisStat("cos",cos_ref[0]) << std::endl;
           std::cout << GridLogMessage << "QHMC-TWIN-KICK-LIST traj " << traj << " step " << step
                     << " nul_v " << BasisList(nul_v) << " nul_eta " << BasisList(nul_eta)
-                    << " nul_kick " << BasisList(nul_kick) << " cos " << BasisList(cos_ref[0]) << std::endl;
+                    << " nul_kick " << BasisList(nul_kick) << " rq_v " << BasisList(rq_v) << " rq_eta " << BasisList(rq_eta)
+                    << " rq_kick " << BasisList(rq_kick) << " cos " << BasisList(cos_ref[0]) << std::endl;
           for(int k=0;k<=np;k++)                                       // as Overlap: cos(v_old, the run's vector)
             std::cout << GridLogMessage << "QHMC-OVERLAP traj " << traj << " step " << step
                       << " stage " << (k ? "pass"+std::to_string(k) : std::string("kick"))
@@ -958,12 +967,12 @@ int main (int argc, char ** argv)
                  << BasisStat("steps_run",steps_run[p]) << BasisStat("steps_twin",steps_twin[p]) << " baseline " << bidx.size();
             list << "QHMC-TWIN-LIST traj " << traj << " step " << step << " pass " << p+1
                  << " cos_twin " << BasisList(cos_twin[p]) << " nul_run " << BasisList(nul_run[p])
-                 << " nul_twin " << BasisList(nul_twin[p]);
+                 << " nul_twin " << BasisList(nul_twin[p]) << " rq_run " << BasisList(rq_run[p]) << " rq_twin " << BasisList(rq_twin[p]);
             if ( base ) {
               line << BasisStat("cos_base",cos_base[p]) << BasisStat("cos_tb",cos_tb[p]) << BasisStat("nul_base",nul_base[p])
                    << BasisStat("steps_base",steps_base[p]);
               list << " base_idx " << BasisList(bidxr) << " cos_base " << BasisList(cos_base[p])
-                   << " cos_tb " << BasisList(cos_tb[p]) << " nul_base " << BasisList(nul_base[p]);
+                   << " cos_tb " << BasisList(cos_tb[p]) << " nul_base " << BasisList(nul_base[p]) << " rq_base " << BasisList(rq_base[p]);
             }
             std::cout << GridLogMessage << line.str() << std::endl;
             std::cout << GridLogMessage << list.str() << std::endl;
