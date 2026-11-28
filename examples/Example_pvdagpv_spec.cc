@@ -12,7 +12,7 @@
 
     Usage :
       $ ./Example_pvdagpv_spec <Nm> <Nk> <maxiter> <Nstop> <inFile> <outDir>
-            --grid Lx.Ly.Lz.Lt --mpi ... [--Ls 16] [--mass 0.1] [--M5 1.0,1.4,...]
+            --grid Lx.Ly.Lz.Lt --mpi ... [--Ls 16] [--mass 0.1] [--M5 1.0,1.4,...] [--b 1.5] [--c 0.5]
 
       Nm      = Maximum size of approximation subspace.
       Nk      = Size of truncation subspace.
@@ -85,8 +85,16 @@ int main (int argc, char ** argv)
     M5s.clear();
     for (auto &x : s) M5s.push_back(std::stod(x));
   }
-  RealD b        = 1.5;
-  RealD c        = 0.5;
+  RealD b        = 1.5;    // Mobius scale, as in Example_pvinv_vs_pvdagm_spec; override with --b
+  RealD c        = 0.5;    // override with --c; --b 1 --c 0 is Shamir
+  if (GridCmdOptionExists(argv,argv+argc,"--b")) {
+    std::string arg = GridCmdOptionPayload(argv,argv+argc,"--b");
+    GridCmdOptionFloat(arg,b);
+  }
+  if (GridCmdOptionExists(argv,argv+argc,"--c")) {
+    std::string arg = GridCmdOptionPayload(argv,argv+argc,"--c");
+    GridCmdOptionFloat(arg,c);
+  }
   RealD KStol    = 1e-8;   // Krylov-Schur tolerance
 
   std::cout << GridLogMessage << "Reading gauge field from: " << file << std::endl;
